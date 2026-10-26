@@ -94,7 +94,7 @@ axwatch = "0.1"
 # Version-aligned GPUI snapshots. Keep the core and platform on one release so
 # the desktop, overlay, and their integrations share the same GPUI types.
 gpui = { package = "gpui-pre", version = "=0.3.4" }
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.4", features = ["font-kit", "x11", "wayland"] }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.4", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
 # Keep the Kit crates on one release checkout: build.rs embeds the upstream
 # themes, which are not included in the published component/assets packages.
 gpui-component = { git = "https://github.com/longbridge/gpui-kit", tag = "v0.6.1" }
