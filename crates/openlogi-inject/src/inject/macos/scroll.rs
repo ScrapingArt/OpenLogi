@@ -77,13 +77,16 @@ pub(in crate::inject) fn post_phased_scroll(delta: ScrollDelta, phase: SmoothScr
     post_continuous_scroll(delta, Some(phase));
 }
 
+/// Base continuous points per wheel tick, calibrated to Logi Options+ (100.0 / 7.67857 ≈ 13.02 pt).
+pub(crate) const CONTINUOUS_POINTS_PER_TICK: f64 = 13.0;
+
 /// Normalize incoming scroll deltas to pixels for continuous injection.
 pub(crate) const fn normalize_continuous_delta(delta: ScrollDelta) -> ScrollDelta {
     match delta {
         ScrollDelta::Pixels { .. } => delta,
         ScrollDelta::WheelTicks { x, y } => ScrollDelta::Pixels {
-            x: x * 10.0,
-            y: y * 10.0,
+            x: x * CONTINUOUS_POINTS_PER_TICK,
+            y: y * CONTINUOUS_POINTS_PER_TICK,
         },
     }
 }
@@ -387,11 +390,11 @@ mod tests {
     fn wheel_ticks_in_continuous_scroll_converts_to_pixels() {
         let ticks = ScrollDelta::WheelTicks { x: 1.0, y: -2.5 };
         let converted = normalize_continuous_delta(ticks);
-        assert_eq!(converted, ScrollDelta::Pixels { x: 10.0, y: -25.0 });
+        assert_eq!(converted, ScrollDelta::Pixels { x: 13.0, y: -32.5 });
         let mut quantizer = ScrollQuantizer::default();
         let delta = quantizer.quantize(converted, 1.0);
-        assert_eq!(delta.x, 10);
-        assert_eq!(delta.y, -25);
+        assert_eq!(delta.x, 13);
+        assert_eq!(delta.y, -33);
         let event = continuous_scroll_event(delta, None).expect("continuous scroll event");
         assert_eq!(
             event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_IS_CONTINUOUS),
@@ -399,11 +402,11 @@ mod tests {
         );
         assert_eq!(
             event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_1),
-            -25
+            -33
         );
         assert_eq!(
             event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_2),
-            10
+            13
         );
     }
 }

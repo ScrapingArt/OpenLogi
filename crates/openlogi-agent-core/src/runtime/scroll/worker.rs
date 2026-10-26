@@ -641,19 +641,23 @@ fn run_worker(
                             (ScrollSource::OsHook(_), ScrollOutputMode::Smooth { .. })
                                 | (ScrollSource::Hidpp(_), ScrollOutputMode::Eased { .. })
                         );
-                        let accelerated = if is_main_wheel {
+                        if is_main_wheel {
                             let sensitivity = preferences.vertical_sensitivity().scroll_multiplier();
-                            accelerate_impulse(
+                            let accelerated = accelerate_impulse(
                                 &mut accelerations,
                                 &input.source,
                                 input.impulse,
                                 at,
                                 sensitivity,
-                            )
+                            );
+                            emit_smooth(ScrollFrame::new(
+                                accelerated,
+                                openlogi_inject::SmoothScrollPhase::Changed,
+                                false,
+                            ));
                         } else {
-                            input.impulse
-                        };
-                        engine.impulse(input.source, accelerated, at, emit_smooth);
+                            engine.impulse(input.source, input.impulse, at, emit_smooth);
+                        }
                     }
                     ScrollOutputMode::Phased { at } => {
                         engine.phased_impulse(input.source, input.impulse, at, emit_smooth);
@@ -1518,7 +1522,8 @@ mod tests {
         )
         .expect("spawn scroll worker");
         let input = runtime.input();
-        assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 1.0)));
+        let session = HidppSessionId::with_epoch("mouse-a", 1);
+        assert!(input.try_hidpp_scroll(&session, ScrollDelta::wheel_ticks(1.0, 0.0)));
         assert_eq!(
             received
                 .recv_timeout(Duration::from_secs(1))
@@ -1538,6 +1543,37 @@ mod tests {
             }
             assert_eq!(phase, openlogi_inject::SmoothScrollPhase::Changed);
         }
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn main_wheel_dispatches_immediate_frame_without_deferral() {
+        let (frames, received) = mpsc::channel();
+        let mut runtime = ScrollRuntime::spawn_with(
+            preferences(true, 14),
+            move |frame| {
+                frames
+                    .send(frame)
+                    .expect("test frame receiver remains open");
+            },
+            |_| {},
+        )
+        .expect("spawn scroll worker");
+        let input = runtime.input();
+        assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 1.0)));
+
+        let frame = received
+            .recv_timeout(Duration::from_millis(50))
+            .expect("immediate dispatch on first tick");
+        assert_eq!(frame.phase, openlogi_inject::SmoothScrollPhase::Changed);
+        assert!(!frame.phased);
+        assert_eq!(frame.delta.y, 1.0);
+
+        // No subsequent delayed animation frames are emitted
+        assert!(
+            received.recv_timeout(Duration::from_millis(50)).is_err(),
+            "immediate dispatch must not queue delayed animation frames"
+        );
         runtime.shutdown();
     }
 
