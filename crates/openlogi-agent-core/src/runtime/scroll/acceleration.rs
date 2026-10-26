@@ -85,6 +85,11 @@ impl WheelAcceleration {
 }
 
 /// Piecewise linear interpolation across the 5 curve breakpoints, scaled by user sensitivity.
+///
+/// Maps user sensitivity multiplier (1.0 at default slider 14) to Logi Options+'s
+/// 50% speed factor (`speed = 0.5 * sensitivity`), capping maximum gain at 6.5x at default
+/// settings. Speed factor is clamped to `[0.05, 1.0]` to prevent runaway acceleration on high
+/// slider values and falls back safely to 0.5 if sensitivity is not finite.
 #[must_use]
 pub fn evaluate_gain(ips: f64, sensitivity: f64) -> f64 {
     let raw_gain = if ips <= CURVE_X[0] {
@@ -101,8 +106,12 @@ pub fn evaluate_gain(ips: f64, sensitivity: f64) -> f64 {
         CURVE_Y[4]
     };
 
-    // Scale with user scrolling speed: gain = 1.0 + (raw_gain - 1.0) * sensitivity
-    1.0 + (raw_gain - 1.0) * sensitivity.max(0.1)
+    // Map user sensitivity (default multiplier 1.0 at slider 14) to Logi Options+
+    // speed factor where default is 0.5 (yielding max 6.5x gain).
+    // Clamp speed factor between 0.05 and 1.0, guarding against NaN.
+    let finite_sens = if sensitivity.is_finite() { sensitivity } else { 1.0 };
+    let speed = (0.5 * finite_sens).clamp(0.05, 1.0);
+    1.0 + (raw_gain - 1.0) * speed
 }
 
 fn interpolate(x: f64, x0: f64, x1: f64, y0: f64, y1: f64) -> f64 {
@@ -115,33 +124,63 @@ mod tests {
     use super::*;
 
     #[test]
-    fn slow_velocity_stays_at_gain_one() {
+    fn evaluate_gain_stays_at_one_given_slow_velocity() {
         assert_eq!(evaluate_gain(0.0, 1.0), 1.0);
         assert_eq!(evaluate_gain(0.2, 1.0), 1.0);
         assert_eq!(evaluate_gain(0.3, 1.0), 1.0);
     }
 
     #[test]
-    fn fast_flick_reaches_maximum_gain() {
+    fn evaluate_gain_reaches_calibrated_default_gain_given_medium_spin() {
+        // At default sensitivity 1.0 (slider 14): speed = 0.5, gain = 1.0 + (12.0 - 1.0) * 0.5 = 6.5
         let gain = evaluate_gain(10.0, 1.0);
-        assert!((gain - 12.0).abs() < 1e-4);
-    }
-
-    #[test]
-    fn extreme_freewheel_tapers_gain() {
-        let gain = evaluate_gain(120.0, 1.0);
-        assert!((gain - 6.0).abs() < 1e-4);
-    }
-
-    #[test]
-    fn sensitivity_scales_gain_properly() {
-        // At sensitivity 0.5: gain = 1.0 + (12.0 - 1.0) * 0.5 = 6.5
-        let gain = evaluate_gain(10.0, 0.5);
         assert!((gain - 6.5).abs() < 1e-4);
     }
 
     #[test]
-    fn acceleration_smoothes_velocity_and_resets_on_idle() {
+    fn evaluate_gain_reaches_maximum_curve_gain_given_high_sensitivity() {
+        // At sensitivity 2.0 (high slider): speed = 1.0, gain = 1.0 + (12.0 - 1.0) * 1.0 = 12.0
+        let gain = evaluate_gain(10.0, 2.0);
+        assert!((gain - 12.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn evaluate_gain_caps_at_maximum_curve_gain_given_out_of_bounds_high_sensitivity() {
+        // Runaway prevention: sensitivity 3.0 is clamped at speed 1.0 -> 12.0 gain
+        let gain = evaluate_gain(10.0, 3.0);
+        assert!((gain - 12.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn evaluate_gain_clamps_minimum_speed_given_near_zero_sensitivity() {
+        // Low boundary clamp: sensitivity 0.0 is clamped to speed 0.05 -> gain = 1.0 + 11.0 * 0.05 = 1.55
+        let gain = evaluate_gain(10.0, 0.0);
+        assert!((gain - 1.55).abs() < 1e-4);
+    }
+
+    #[test]
+    fn evaluate_gain_falls_back_safely_given_nan_sensitivity() {
+        // NaN fallback: defaults to finite sensitivity 1.0 -> speed 0.5 -> 6.5 gain
+        let gain = evaluate_gain(10.0, f64::NAN);
+        assert!((gain - 6.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn evaluate_gain_tapers_gain_given_extreme_freewheel() {
+        // At default sensitivity 1.0: raw_gain = 6.0, gain = 1.0 + (6.0 - 1.0) * 0.5 = 3.5
+        let gain = evaluate_gain(120.0, 1.0);
+        assert!((gain - 3.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn evaluate_gain_scales_linearly_given_low_sensitivity() {
+        // At sensitivity 0.4: speed = 0.2, gain = 1.0 + (12.0 - 1.0) * 0.2 = 3.2
+        let gain = evaluate_gain(10.0, 0.4);
+        assert!((gain - 3.2).abs() < 1e-4);
+    }
+
+    #[test]
+    fn wheel_acceleration_smoothes_velocity_and_resets_given_idle() {
         let mut accel = WheelAcceleration::new();
         let now = Instant::now();
 
