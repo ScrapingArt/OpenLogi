@@ -161,7 +161,7 @@ def extract_settings(data):
                 sw = card.get("mouseScrollWheelSettings", {}).get("smartshift", {})
                 if sw.get("isEnabled"):
                     dev["smartshift"] = {
-                        "mode": "Ratchet" if sw.get("mode") == "RATCHET" else "Freespin",
+                        "mode": "ratchet" if sw.get("mode") == "RATCHET" else "free",
                         "auto_disengage": max(8, min(254, int(sw.get("sensitivity", 83)))),
                         "tunable_torque": 0,
                     }
