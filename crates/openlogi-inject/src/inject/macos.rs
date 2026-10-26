@@ -89,8 +89,9 @@ use keycode::hid_usage_to_macos;
 use menu_shortcut::{MenuPress, MenuShortcut};
 use scroll::dispatch_scroll;
 pub(super) use scroll::{post_phased_scroll, post_scroll, post_smooth_scroll};
+pub use spaces::post_live_drag as post_live_space_drag;
 pub(super) use spaces::{natural_scrolling, set_desktop_switch};
-use spaces::{next_desktop, previous_desktop};
+use spaces::{next_desktop, previous_desktop, smart_zoom};
 use symbolic_hotkey::{capture_region, screenshot};
 pub use virtual_keyboard::{VirtualKeyboard, is_virtual_keyboard_product};
 
@@ -277,6 +278,7 @@ fn dispatch_native(native: NativeAction) {
         // synthesised power key), so ask powermanagement directly. `pmset
         // sleepnow` works for the console user without privileges.
         NativeAction::Sleep => sleep_system(),
+        NativeAction::SmartZoom => smart_zoom(),
     }
 }
 

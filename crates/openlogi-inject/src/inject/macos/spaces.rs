@@ -62,6 +62,60 @@ pub(super) fn next_desktop() {
     start(Direction::Next);
 }
 
+/// Post an Apple Trackpad Smart Zoom event.
+///
+/// WindowServer recognises this as a native two-finger double-tap,
+/// smoothly zooming on the content directly beneath the pointer in
+/// Safari, Preview, Photos, and other AppKit/WebKit apps.
+pub(super) fn smart_zoom() {
+    let Some(event) = CGEvent::new(None) else {
+        tracing::warn!("CGEvent::new failed for smart zoom");
+        return;
+    };
+    CGEvent::set_type(Some(&event), CGEventType(29));
+    CGEvent::set_integer_value_field(Some(&event), CGEventField(55), 29);
+    CGEvent::set_integer_value_field(Some(&event), CGEventField(110), 22);
+    CGEvent::set_integer_value_field(
+        Some(&event),
+        CGEventField::EventSourceUserData,
+        super::super::SYNTHETIC_EVENT_USER_DATA,
+    );
+    CGEvent::post(CGEventTapLocation::SessionEventTap, Some(&event));
+}
+
+/// Post one real-time frame of a live user-dragged Space switch.
+///
+/// Progress is normalized signed travel (-1.0 to 1.0).
+/// Began starts tracking, Changed updates live position with cursor motion,
+/// and Ended finishes the gesture with an exit velocity so the Dock completes
+/// the switch or springs back.
+pub fn post_live_drag(progress: f64, phase: super::super::LiveDragPhase) {
+    objc2::rc::autoreleasepool(|_| {
+        let target_phase = match phase {
+            super::super::LiveDragPhase::Began => SlidePhase::Began,
+            super::super::LiveDragPhase::Changed => SlidePhase::Changed,
+            super::super::LiveDragPhase::Ended => SlidePhase::Ended,
+        };
+        let frame = SlideFrame {
+            at: Duration::ZERO,
+            progress,
+            phase: target_phase,
+        };
+        let event = match *DOCK_SWIPE_LAYOUT {
+            DockSwipeLayout::HidEvent => {
+                let Some(swipe) = HidSwipe::new(natural_scrolling()) else {
+                    return;
+                };
+                swipe.event(slide_phase(target_phase), progress)
+            }
+            DockSwipeLayout::Fields => slide_event(frame),
+        };
+        if let Some(event) = event {
+            CGEvent::post(CGEventTapLocation::SessionEventTap, Some(&event));
+        }
+    });
+}
+
 fn start(direction: Direction) {
     let Some(lease) = Lease::acquire(&BUSY) else {
         tracing::debug!(?direction, "Space switch already pending — skipped");
@@ -391,7 +445,11 @@ fn slide_event(frame: SlideFrame) -> Option<CFRetained<CGEvent>> {
     if frame.phase == SlidePhase::Ended {
         // An emphatic exit velocity toward the progress sign asks the Dock to
         // finish the switch rather than spring back, as the instant switch does.
-        let velocity = frame.progress.signum() * 9999.0;
+        let velocity = if frame.progress.abs() >= 1e-4 {
+            frame.progress.signum() * 9999.0
+        } else {
+            0.0
+        };
         CGEvent::set_double_value_field(Some(&event), CGEventField(129), velocity);
         CGEvent::set_double_value_field(Some(&event), CGEventField(130), velocity);
     }
@@ -543,7 +601,11 @@ fn dock_swipe_hid_event(
         let _: () = msg_send![&*hid, setDoubleValue: progress, forField: HID_FIELD_PROGRESS];
         if phase == 4 {
             let velocity = hid_event(class, HID_TYPE_VELOCITY)?;
-            let speed = progress.signum() * 9999.0;
+            let speed = if progress.abs() >= 1e-4 {
+                progress.signum() * 9999.0
+            } else {
+                0.0
+            };
             let _: () =
                 msg_send![&*velocity, setDoubleValue: speed, forField: HID_FIELD_VELOCITY_X];
             let _: () =

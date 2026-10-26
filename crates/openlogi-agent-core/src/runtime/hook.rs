@@ -19,9 +19,12 @@ use openlogi_hook::{
 };
 use tracing::{info, warn};
 
-use super::scroll::ScrollInputHandle;
+use super::scroll::{ScrollInputHandle, WheelDebouncer};
 use super::{ActionDispatchTarget, ActionDispatcher, PressToken};
 use crate::event_monitor::SharedEventMonitor;
+
+mod live_drag;
+use live_drag::LiveSpaceDrag;
 
 /// The button maps and selected-device thumb-wheel polarity the OS-hook callback
 /// reads, kept behind ONE lock so a config rebuild publishes one coherent
@@ -74,6 +77,7 @@ const HOLD_STALE_AFTER: Duration = Duration::from_secs(10);
 struct HoldState {
     current: Option<GestureHold>,
     swipe: SwipeAccumulator,
+    live_drag: LiveSpaceDrag,
 }
 
 struct GestureHold {
@@ -109,6 +113,7 @@ impl HoldState {
         }
 
         self.swipe.end();
+        self.live_drag.reset();
         if held.button == button {
             HoldAdmission::Begin
         } else {
@@ -124,6 +129,7 @@ impl HoldState {
             press,
         });
         self.swipe.begin();
+        self.live_drag.reset();
     }
 
     /// Feed a pointer-move delta into the active hold, tagging a committed swipe
@@ -140,6 +146,13 @@ impl HoldState {
     /// click. A swipe returns `false`; a stray release returns `None`.
     fn end(&mut self, button: ButtonId) -> Option<(PressToken, bool)> {
         let held = self.current.take_if(|held| held.button == button)?;
+        let live_ended = self.live_drag.finish();
+        if let Some((progress, phase)) = live_ended {
+            #[cfg(target_os = "macos")]
+            openlogi_inject::post_live_space_drag(progress, phase);
+            self.swipe.end();
+            return Some((held.press, false));
+        }
         let was_click = self.swipe.end();
         Some((held.press, was_click))
     }
@@ -150,6 +163,10 @@ impl HoldState {
     fn cancel(&mut self) {
         self.current = None;
         self.swipe.end();
+        if let Some((progress, phase)) = self.live_drag.finish() {
+            #[cfg(target_os = "macos")]
+            openlogi_inject::post_live_space_drag(progress, phase);
+        }
     }
 
     /// Age the current hold past the staleness horizon, so tests can exercise
@@ -161,6 +178,7 @@ impl HoldState {
         {
             held.started_at = aged;
         }
+        self.live_drag.backdate_hold_for_test();
     }
 }
 
@@ -178,6 +196,8 @@ thread_local! {
     /// key-down events are auto-repeat, not replacement presses; their first
     /// matching key-up ends the lifecycle.
     static HELD_KEYS: RefCell<HashSet<u16>> = RefCell::new(HashSet::new());
+    /// Thread-local wheel debouncer for OS-hook events.
+    static HOOK_DEBOUNCER: RefCell<WheelDebouncer> = RefCell::new(WheelDebouncer::default());
 }
 
 /// Whether a button event's physical source may be remapped/suppressed.
@@ -371,6 +391,38 @@ fn handle_moved(
     hooks: &SharedHookMaps,
     dispatcher: &ActionDispatcher,
 ) -> EventDisposition {
+    #[cfg(target_os = "macos")]
+    let is_space_gesture = hooks.try_read().is_ok_and(|m| {
+        HOLD.with_borrow(|h| {
+            h.current.as_ref().is_some_and(|held| {
+                m.gestures.get(&held.button).is_some_and(|dirs| {
+                    matches!(
+                        dirs.get(&GestureDirection::Left),
+                        Some(Action::PreviousDesktop)
+                    ) && matches!(
+                        dirs.get(&GestureDirection::Right),
+                        Some(Action::NextDesktop)
+                    )
+                })
+            })
+        })
+    });
+
+    #[cfg(target_os = "macos")]
+    if is_space_gesture {
+        let frame = HOLD.with_borrow_mut(|h| {
+            h.live_drag
+                .update(f64::from(delta_x), f64::from(delta_y))
+        });
+        if let Some((progress, phase)) = frame {
+            openlogi_inject::post_live_space_drag(progress, phase);
+            return EventDisposition::PassThrough;
+        }
+        if HOLD.with_borrow(|h| h.live_drag.is_active()) {
+            return EventDisposition::PassThrough;
+        }
+    }
+
     let commit = HOLD.with_borrow_mut(|h| h.accumulate(delta_x, delta_y));
     if let Some((press, button, dir)) = commit {
         let action = hooks.try_read().ok().map(|m| {
@@ -467,20 +519,29 @@ pub fn start(
                     id,
                     pressed,
                     device,
-                } => handle_button(
-                    id,
-                    pressed,
-                    device.as_ref(),
-                    &hooks,
-                    &dispatcher,
-                    openlogi_hook::frontmost_safari_pid,
-                ),
+                } => {
+                    if id == ButtonId::MiddleClick && button_source_may_remap(device.as_ref()) {
+                        HOOK_DEBOUNCER.with_borrow_mut(|debouncer| {
+                            debouncer.on_middle_button(pressed, Instant::now());
+                        });
+                        scroll.on_middle_button(pressed);
+                    }
+                    handle_button(
+                        id,
+                        pressed,
+                        device.as_ref(),
+                        &hooks,
+                        &dispatcher,
+                        openlogi_hook::frontmost_safari_pid,
+                    )
+                }
                 MouseEvent::Moved { delta_x, delta_y } => {
                     handle_moved(delta_x, delta_y, &hooks, &dispatcher)
                 }
                 MouseEvent::CaptureInterrupted => {
                     HOLD.with_borrow_mut(HoldState::cancel);
                     HELD_KEYS.with_borrow_mut(HashSet::clear);
+                    HOOK_DEBOUNCER.with_borrow_mut(WheelDebouncer::reset);
                     dispatcher.cancel_hook_thread_buttons();
                     scroll.cancel_hooks();
                     EventDisposition::PassThrough
@@ -509,6 +570,12 @@ pub fn start(
                         ));
                     }
                     if scroll_source_may_intercept(from_trackpad, device.as_ref()) {
+                        let filtered = HOOK_DEBOUNCER.with_borrow_mut(|debouncer| {
+                            debouncer.filter_scroll(delta, Instant::now())
+                        });
+                        let Some(delta) = filtered else {
+                            return EventDisposition::Suppress;
+                        };
                         return queued_event_disposition(scroll.try_hook_scroll(delta));
                     }
                     EventDisposition::PassThrough

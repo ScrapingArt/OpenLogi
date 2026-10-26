@@ -219,6 +219,8 @@ pub enum Action {
     /// returns to the sensor's default DPI. A DPI LED (HID++ `0x1300`) is
     /// lit while the mode is on. Does nothing on other devices.
     TogglePrecisionMode,
+    /// Native Apple Trackpad Smart Zoom (two-finger double-tap zoom simulation).
+    SmartZoom,
 }
 
 /// Which of a held chord's keys stay down for the lifetime of the press.
@@ -310,6 +312,7 @@ macro_rules! for_each_unit_action {
             NextDesktop "Next Desktop" "actions.next_desktop" Navigation NextDesktop,
             ShowDesktop "Show Desktop" "actions.show_desktop" Navigation Monitor,
             LaunchpadShow "Launchpad" "actions.launchpad" Navigation Applications,
+            SmartZoom "Smart Zoom" "actions.smart_zoom" Navigation Search,
             // System
             None "Do Nothing" "pointer.do_nothing" System Ban,
             LockScreen "Lock Screen" "actions.lock_screen" System Lock,

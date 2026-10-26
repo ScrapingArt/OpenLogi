@@ -174,6 +174,9 @@ fn dispatch_native(native: NativeAction) {
         NativeAction::Sleep => {
             tracing::debug!("Sleep has no Windows synthesis yet — action skipped");
         }
+        NativeAction::SmartZoom => {
+            tracing::debug!("SmartZoom has no Windows synthesis — action skipped");
+        }
     }
 }
 

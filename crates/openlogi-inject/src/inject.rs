@@ -21,7 +21,18 @@ use openlogi_core::scroll::ScrollDelta;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
-pub use macos::{VirtualKeyboard, is_virtual_keyboard_product};
+pub use macos::{VirtualKeyboard, is_virtual_keyboard_product, post_live_space_drag};
+
+/// Phases of a continuous 1:1 user drag gesture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LiveDragPhase {
+    /// Initial frame when motion exceeds deadband.
+    Began,
+    /// Ongoing tracking frames following cursor movement.
+    Changed,
+    /// Final release frame completing or cancelling the gesture.
+    Ended,
+}
 
 #[cfg(any(target_os = "macos", test))]
 mod space_switch;
