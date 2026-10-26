@@ -581,3 +581,102 @@ fn gesture_maps_cover_every_gesture_mode_button() {
         "a promoted OS-hook button gets its own menu simultaneously"
     );
 }
+
+fn test_mouse_state() -> AppState {
+    let mut config = Config::default();
+    config.set_device_identity(
+        "2b042",
+        DeviceIdentity {
+            display_name: "MX Master 4".to_string(),
+            kind: DeviceKind::Mouse,
+            capabilities: Capabilities {
+                virtual_thumbwheel: true,
+                ..Capabilities::presumed_from_kind(DeviceKind::Mouse)
+            },
+            light_capabilities: None,
+            model_info: None,
+            codename: None,
+            driver_id: None,
+            registry_model_id: None,
+        },
+    );
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    AppState::new(Sources::in_memory(config, &AssetResolver::new(), commands))
+}
+
+#[test]
+fn trigger_binding_commit_and_clear_preserves_slots_and_wheel_hold() {
+    use openlogi_core::binding::{Action, ButtonId, HeldWheel};
+    use crate::state::TriggerSlot;
+
+    let mut state = test_mouse_state();
+    let btn = ButtonId::Forward;
+
+    // 1. Configure Click, DoubleClick, Hold
+    let _ = state.commit_trigger_binding(btn, TriggerSlot::Click, Some(Action::Copy));
+    let _ = state.commit_trigger_binding(btn, TriggerSlot::DoubleClick, Some(Action::Paste));
+    let _ = state.commit_trigger_binding(btn, TriggerSlot::Hold, Some(Action::Cut));
+
+    let (click, double, _triple, hold) = state.button_triggers(btn);
+    assert_eq!(click, Action::Copy);
+    assert_eq!(double, Some(Action::Paste));
+    assert_eq!(hold, Some(Action::Cut));
+
+    // 2. Clear DoubleClick -> transitions to LongPress
+    let _ = state.commit_trigger_binding(btn, TriggerSlot::DoubleClick, None);
+    let (click, double, _triple, hold) = state.button_triggers(btn);
+    assert_eq!(click, Action::Copy);
+    assert_eq!(double, None);
+    assert_eq!(hold, Some(Action::Cut));
+
+    // 3. Clear Hold -> transitions to Single
+    let _ = state.commit_trigger_binding(btn, TriggerSlot::Hold, None);
+    let (click, double, _triple, hold) = state.button_triggers(btn);
+    assert_eq!(click, Action::Copy);
+    assert_eq!(double, None);
+    assert_eq!(hold, None);
+
+    // 4. Configure Wheel-Hold mode
+    let back_btn = ButtonId::Back;
+    let _ = state.commit_wheel_hold_mode(back_btn, Some(HeldWheel::Zoom));
+    assert_eq!(state.button_wheel_hold_mode(back_btn), Some(HeldWheel::Zoom));
+
+    // 5. Changing Click on Wheel-Hold preserves WheelHold mode
+    let _ = state.commit_trigger_binding(back_btn, TriggerSlot::Click, Some(Action::MissionControl));
+    assert_eq!(state.button_wheel_hold_mode(back_btn), Some(HeldWheel::Zoom));
+    let (click, _, _, _) = state.button_triggers(back_btn);
+    assert_eq!(click, Action::MissionControl);
+}
+
+#[test]
+fn gesture_mode_supports_double_click_and_hold() {
+    use openlogi_core::binding::{Action, ButtonId, GestureDirection};
+
+    let mut state = test_mouse_state();
+    let btn = ButtonId::GestureButton;
+
+    let _ = state.commit_gesture_binding(btn, GestureDirection::DoubleClick, Action::Copy);
+    let _ = state.commit_gesture_binding(btn, GestureDirection::Hold, Action::Paste);
+
+    let maps = state.current_gesture_maps();
+    let gesture_map = maps.get(&btn).expect("gesture button map present");
+    assert_eq!(gesture_map.get(&GestureDirection::DoubleClick), Some(&Action::Copy));
+    assert_eq!(gesture_map.get(&GestureDirection::Hold), Some(&Action::Paste));
+}
+
+#[test]
+fn button_debounce_configuration_persists() {
+    let mut state = test_mouse_state();
+    let btn = ButtonId::GestureButton;
+
+    assert_eq!(state.button_debounce_ms(btn), 400);
+
+    let _ = state.commit_button_debounce(btn, 550);
+    assert_eq!(state.button_debounce_ms(btn), 550);
+
+    let _ = state.commit_button_debounce(btn, 1200); // clamped to 1000
+    assert_eq!(state.button_debounce_ms(btn), 1000);
+
+    let _ = state.commit_button_debounce(btn, 50); // clamped to 150
+    assert_eq!(state.button_debounce_ms(btn), 150);
+}

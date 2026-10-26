@@ -1180,7 +1180,7 @@ fn single_click_fires_after_double_click_timeout() {
     }, &mut |e| events.push(e));
 
     // Advance time past DOUBLE_CLICK_TIMEOUT
-    let past = Instant::now() + Duration::from_millis(350);
+    let past = Instant::now() + Duration::from_millis(450);
     let due = state.due_long_presses(past);
     assert_eq!(due.len(), 1);
 

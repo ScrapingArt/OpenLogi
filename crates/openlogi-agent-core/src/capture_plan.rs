@@ -76,6 +76,19 @@ pub struct DispatchPlan {
     /// Pointer identity used to select these mouse bindings; absent for the
     /// explicitly focused policy and keyboard input.
     pub pointer_target: Option<openlogi_hook::PointerTarget>,
+    /// Per-button double-click debounce window.
+    pub button_debounce: BTreeMap<ButtonId, std::time::Duration>,
+}
+
+impl DispatchPlan {
+    /// Resolved double-click debounce duration for `button`.
+    #[must_use]
+    pub fn debounce_for(&self, button: ButtonId) -> std::time::Duration {
+        self.button_debounce
+            .get(&button)
+            .copied()
+            .unwrap_or(openlogi_core::binding::DEFAULT_DOUBLE_CLICK_TIMEOUT)
+    }
 }
 
 /// One device's independently versioned hardware target and dispatch plan.
@@ -277,9 +290,12 @@ pub fn plan_for_device(
         .filter(|entry| !divert_wheel_buttons.contains(entry))
         .filter(|(_, button)| {
             bindings.get(button).is_some_and(|binding| {
-                // Both decide on release whether the click runs, which only
+                // Decides on release whether the click runs, which only
                 // the shared button runtime can do.
-                if matches!(binding, Binding::LongPress(_) | Binding::WheelHold(_)) {
+                if matches!(
+                    binding,
+                    Binding::LongPress(_) | Binding::WheelHold(_) | Binding::MultiClick(_)
+                ) {
                     return true;
                 }
                 let action = binding.click_action();
@@ -305,6 +321,16 @@ pub fn plan_for_device(
             .is_some_and(|binding| binding.click_action() != default_binding(*button))
     });
     let thumbwheel_sensitivity = config.thumbwheel_sensitivity(config_key);
+    let mut button_debounce = BTreeMap::new();
+    for button in openlogi_core::binding::ButtonId::ALL {
+        if let Some(ms) = config.button_debounce_ms(config_key, button) {
+            button_debounce.insert(button, std::time::Duration::from_millis(u64::from(ms)));
+        } else if let Some(Binding::MultiClick(mc)) = bindings.get(&button) {
+            if let Some(ms) = mc.debounce_ms() {
+                button_debounce.insert(button, std::time::Duration::from_millis(u64::from(ms)));
+            }
+        }
+    }
     DeviceCapturePlan {
         target: CaptureTarget {
             physical_key,
@@ -334,6 +360,7 @@ pub fn plan_for_device(
             thumbwheel_sensitivity,
             invert_wheel: false,
             pointer_target: None,
+            button_debounce,
         },
     }
 }

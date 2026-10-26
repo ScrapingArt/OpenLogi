@@ -319,6 +319,7 @@ impl ButtonEventHandler {
 pub struct ActionDispatcher {
     executor: ActionExecutor,
     buttons: ButtonInputHandle,
+    tokio_handle: Option<tokio::runtime::Handle>,
 }
 
 /// Unique owner of the button worker plus its cloneable action dispatcher.
@@ -347,10 +348,12 @@ impl ActionRuntime {
         let mut button_handler = ButtonEventHandler::new(executor.clone());
         let buttons = ButtonRuntimeOwner::spawn(move |event| button_handler.handle(event))?;
         let input = buttons.input();
+        let tokio_handle = tokio::runtime::Handle::try_current().ok();
         Ok(Self {
             dispatcher: ActionDispatcher {
                 executor,
                 buttons: input,
+                tokio_handle,
             },
             buttons,
         })
@@ -385,6 +388,25 @@ impl ActionDispatcher {
             device_key,
             ActionDispatchTarget::for_pointer(target, openlogi_hook::frontmost_safari_pid),
         );
+    }
+
+    pub(crate) fn spawn_delayed_pointer_action(
+        &self,
+        action: Action,
+        device_key: Option<String>,
+        target: Option<openlogi_hook::PointerTarget>,
+        delay: std::time::Duration,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let handle = self
+            .tokio_handle
+            .as_ref()
+            .cloned()
+            .or_else(|| tokio::runtime::Handle::try_current().ok())?;
+        let dispatcher = self.clone();
+        Some(handle.spawn(async move {
+            tokio::time::sleep(delay).await;
+            dispatcher.dispatch_pointer_action(&action, device_key.as_deref(), target);
+        }))
     }
 
     /// Queue one OS-hook down edge without blocking the callback. The returned

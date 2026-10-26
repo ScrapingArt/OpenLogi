@@ -54,6 +54,7 @@ pub enum SmartShiftWriteStatus {
 }
 
 use agent::AgentSession;
+pub use bindings::TriggerSlot;
 use bindings::BindingState;
 use device_store::DeviceStore;
 pub(crate) use devices::camera_model_info;

@@ -5,12 +5,12 @@ use std::rc::Rc;
 
 use gpui::{
     Context, Entity, InteractiveElement, IntoElement, ParentElement, Role,
-    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px, rgb, svg,
+    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
-use gpui_base::Button as BaseButton;
+use gpui_base::{Button as BaseButton, StyledExt as _};
 use gpui_component::{
-    Disableable as _, Icon, IconName, Selectable as _, Sizable as _, button::Button, h_flex,
-    input::InputState, scroll::ScrollableElement as _, v_flex,
+    Disableable as _, Icon, IconName, Selectable as _, Sizable as _, button::Button,
+    h_flex, input::InputState, scroll::ScrollableElement as _, v_flex,
 };
 use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
 
@@ -22,7 +22,7 @@ use crate::features::binding_editor::{
     GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_matching, editor_section,
     gesture_direction_icon,
 };
-use crate::state::AppState;
+use crate::state::{AppState, TriggerSlot};
 use crate::ui::action::localized_action_label;
 use crate::ui::components::{MenuRow, Toggle, control_button, control_input, toggle_row};
 use crate::ui::theme::{self, ACCENT_BLUE, Palette, Typography as _};
@@ -47,11 +47,17 @@ pub(super) struct BindingInspectorData<'a> {
     /// [`ForceSensingFacts::current`](super::force_sensing::ForceSensingFacts::current)
     /// says it shows.
     pub press_force: Option<PressForce<'a>>,
+    pub click_action: &'a Action,
+    pub double_click_action: Option<&'a Action>,
+    pub hold_action: Option<&'a Action>,
+    pub wheel_hold_mode: Option<openlogi_core::binding::HeldWheel>,
+    pub debounce_ms: u32,
 }
 
 #[derive(Clone, Copy)]
 pub(super) struct ActionPickerContext<'a> {
     pub open: bool,
+    pub trigger_slot: TriggerSlot,
     pub search: &'a Entity<InputState>,
     pub shortcut_input: &'a Entity<InputState>,
     pub application_input: &'a Entity<InputState>,
@@ -174,22 +180,97 @@ fn button_inspector(
         .cloned()
         .unwrap_or_else(|| default_binding(button));
     let observer = picker.view.clone();
+    let slot = picker.trigger_slot;
+    let is_app = data.editing_app.is_some();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
-        AppState::apply(cx, |state| state.commit_binding(button, action));
+        if is_app {
+            AppState::apply(cx, |state| state.commit_binding(button, action));
+        } else {
+            AppState::apply(cx, |state| state.commit_trigger_binding(button, slot, Some(action)));
+        }
         observer.update(cx, |view, cx| {
             view.close_action_picker();
             cx.notify();
         });
     });
 
+    let primary_action = if is_app { &action } else { data.click_action };
+
     v_flex()
         .gap_3()
         .child(inspector_heading(
             tr!(button.translation_key()),
-            Some(button_status(button, &action, data, overridden)),
+            Some(button_status(button, primary_action, data, overridden)),
             pal,
         ))
-        .child(current_action_card(&action, picker, pal))
+        .when(is_app, |panel| {
+            panel.child(current_action_card(&action, picker, pal))
+        })
+        .when(!is_app, |panel| {
+            let double_action = data.double_click_action;
+            let hold_action = data.hold_action;
+            panel
+                .child(trigger_action_card(
+                    "inspector-current-action",
+                    tr!("actions.single_click"),
+                    TriggerSlot::Click,
+                    Some(data.click_action),
+                    picker,
+                    pal,
+                    None,
+                ))
+                .when(!data.wheel_hold.contains(&button), |p| {
+                    p.child(if let Some(act) = double_action {
+                        trigger_action_card(
+                            "inspector-double-click-action",
+                            tr!("actions.double_click"),
+                            TriggerSlot::DoubleClick,
+                            Some(act),
+                            picker,
+                            pal,
+                            Some(Rc::new(move |_window: &mut Window, cx: &mut Context<MouseModelView>| {
+                                AppState::apply(cx, |state| state.commit_trigger_binding(button, TriggerSlot::DoubleClick, None));
+                            })),
+                        )
+                    } else {
+                        trigger_action_card(
+                            "inspector-double-click-action",
+                            tr!("actions.add_double_click"),
+                            TriggerSlot::DoubleClick,
+                            None,
+                            picker,
+                            pal,
+                            None,
+                        )
+                    })
+                })
+                .when(!data.wheel_hold.contains(&button), |p| {
+                    p.child(if let Some(act) = hold_action {
+                        trigger_action_card(
+                            "inspector-hold-action",
+                            tr!("actions.click_and_hold"),
+                            TriggerSlot::Hold,
+                            Some(act),
+                            picker,
+                            pal,
+                            Some(Rc::new(move |_window: &mut Window, cx: &mut Context<MouseModelView>| {
+                                AppState::apply(cx, |state| state.commit_trigger_binding(button, TriggerSlot::Hold, None));
+                            })),
+                        )
+                    } else {
+                        trigger_action_card(
+                            "inspector-hold-action",
+                            tr!("actions.add_click_and_hold"),
+                            TriggerSlot::Hold,
+                            None,
+                            picker,
+                            pal,
+                            None,
+                        )
+                    })
+                })
+        })
+        .child(debounce_control(button, data.debounce_ms, pal))
         .children(wheel_hold_section(
             button,
             data,
@@ -245,9 +326,18 @@ fn button_inspector(
                 .map(|press_force| force_sensing_row(press_force, pal)),
         )
         .when(picker.open, |panel| {
+            let active_action = if is_app {
+                Some(&action)
+            } else {
+                match picker.trigger_slot {
+                    TriggerSlot::Click => Some(data.click_action),
+                    TriggerSlot::DoubleClick => data.double_click_action,
+                    TriggerSlot::Hold => data.hold_action,
+                }
+            };
             panel.child(action_library(
                 "inspector-action",
-                Some(&action),
+                active_action,
                 picker,
                 &on_pick,
                 pal,
@@ -264,7 +354,10 @@ fn button_status(
     data: &BindingInspectorData<'_>,
     overridden: bool,
 ) -> gpui::SharedString {
-    let default = *action == default_binding(button) && !data.wheel_hold.contains(&button);
+    let default = *action == default_binding(button)
+        && data.double_click_action.is_none()
+        && data.hold_action.is_none()
+        && !data.wheel_hold.contains(&button);
     match (data.editing_app, overridden, default) {
         (Some(app), true, _) => tr!("actions.overridden_in_app", app => app.to_string()),
         (Some(_), false, _) => tr!("profiles.inherited_from_default"),
@@ -283,12 +376,12 @@ fn wheel_hold_section(
     view: &Entity<MouseModelView>,
     pal: Palette,
 ) -> Option<gpui::AnyElement> {
-    let enabled = data.wheel_hold.contains(&button);
+    let is_enabled = data.wheel_hold.contains(&button);
     match data.editing_app {
-        None if button.supports_wheel_hold() && (data.virtual_thumbwheel || enabled) => {
-            Some(wheel_hold_row(button, enabled, view, pal).into_any_element())
+        None if button.supports_wheel_hold() && (data.virtual_thumbwheel || is_enabled) => {
+            Some(wheel_hold_row(button, is_enabled, data.wheel_hold_mode, view, pal).into_any_element())
         }
-        Some(app) if enabled && !overridden => Some(
+        Some(app) if is_enabled && !overridden => Some(
             div()
                 .debug_selector(|| "inspector-wheel-hold-app-note".into())
                 .text_caption()
@@ -303,38 +396,66 @@ fn wheel_hold_section(
     }
 }
 
-/// Back/Forward's wheel-hold switch. Shown only in the global profile: a
-/// per-app entry holds one action, so the mode is device-wide. Turning it
-/// off stays possible on a device that does not report raw wheel, so a
-/// binding carried over from another mouse can be removed.
-///
-/// The gesture inspector offers it too. Turning it on there leaves gesture
-/// mode, stashing the direction map, so the selected direction is cleared
-/// as "Use a single action" does.
+/// Back/Forward's wheel-hold switch and mode selector. Shown only in the global profile: a
+/// per-app entry holds one action, so the mode is device-wide.
 fn wheel_hold_row(
     button: ButtonId,
     enabled: bool,
+    mode: Option<openlogi_core::binding::HeldWheel>,
     view: &Entity<MouseModelView>,
     pal: Palette,
 ) -> impl IntoElement {
     let observer = view.clone();
-    toggle_row(
-        "inspector-wheel-hold-row",
-        pal,
-        tr!("actions.hold_to_scroll_sideways"),
-        tr!("actions.hold_to_scroll_sideways_description"),
-        Toggle::new("inspector-wheel-hold-toggle")
-            .selected(enabled)
-            .on_change(move |enabled, _window, cx| {
-                AppState::apply(cx, |state| state.commit_wheel_hold(button, *enabled));
-                if *enabled {
-                    observer.update(cx, |view, cx| {
-                        view.set_gesture_selected_dir(None);
-                        cx.notify();
-                    });
-                }
-            }),
-    )
+    let effective_mode = mode.unwrap_or(openlogi_core::binding::HeldWheel::HorizontalScroll);
+    v_flex()
+        .gap_2()
+        .child(
+            toggle_row(
+                "inspector-wheel-hold-row",
+                pal,
+                tr!("actions.hold_and_scroll"),
+                tr!("actions.hold_and_scroll_description"),
+                Toggle::new("inspector-wheel-hold-toggle")
+                    .selected(enabled)
+                    .on_change(move |enabled, _window, cx| {
+                        AppState::apply(cx, |state| state.commit_wheel_hold(button, *enabled));
+                        if *enabled {
+                            observer.update(cx, |view, cx| {
+                                view.set_gesture_selected_dir(None);
+                                cx.notify();
+                            });
+                        }
+                    }),
+            ),
+        )
+        .when(enabled, |panel| {
+            panel.child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("wheel-hold-mode-zoom")
+                            .compact()
+                            .label(tr!("actions.pinch_to_zoom"))
+                            .selected(effective_mode == openlogi_core::binding::HeldWheel::Zoom)
+                            .on_click(move |_, _, cx| {
+                                AppState::apply(cx, |state| {
+                                    state.commit_wheel_hold_mode(button, Some(openlogi_core::binding::HeldWheel::Zoom))
+                                });
+                            }),
+                    )
+                    .child(
+                        Button::new("wheel-hold-mode-scroll")
+                            .compact()
+                            .label(tr!("actions.side_scroll"))
+                            .selected(effective_mode == openlogi_core::binding::HeldWheel::HorizontalScroll)
+                            .on_click(move |_, _, cx| {
+                                AppState::apply(cx, |state| {
+                                    state.commit_wheel_hold_mode(button, Some(openlogi_core::binding::HeldWheel::HorizontalScroll))
+                                });
+                            }),
+                    ),
+            )
+        })
 }
 
 fn inherited_gesture_inspector(
@@ -430,8 +551,9 @@ fn gesture_inspector(
             pal,
         ))
         .child(current_action_card(&current, picker, pal))
+        .child(debounce_control(button, data.debounce_ms, pal))
         .when(offer_wheel_hold, |panel| {
-            panel.child(wheel_hold_row(button, false, picker.view, pal))
+            panel.child(wheel_hold_row(button, false, None, picker.view, pal))
         })
         .child(
             control_button("inspector-single-action")
@@ -459,6 +581,70 @@ fn gesture_inspector(
                 cx,
             ))
         })
+}
+
+fn debounce_control(button: ButtonId, debounce_ms: u32, pal: Palette) -> gpui::Div {
+    let dec_btn = button;
+    let inc_btn = button;
+    let can_dec = debounce_ms > 150;
+    let can_inc = debounce_ms < 1000;
+    let next_dec = debounce_ms.saturating_sub(50).max(150);
+    let next_inc = debounce_ms.saturating_add(50).min(1000);
+
+    h_flex()
+        .w_full()
+        .justify_between()
+        .items_center()
+        .px_3()
+        .py_2()
+        .rounded_md()
+        .border_1()
+        .border_color(pal.border)
+        .bg(pal.control)
+        .child(
+            v_flex()
+                .gap_0p5()
+                .child(
+                    div()
+                        .text_xs()
+                        .font_bold()
+                        .text_color(pal.text_primary)
+                        .child(tr!("actions.debounce")),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(pal.text_muted)
+                        .child(format!("{debounce_ms} ms")),
+                ),
+        )
+        .child(
+            h_flex()
+                .gap_1p5()
+                .items_center()
+                .child(
+                    Button::new("btn-debounce-dec")
+                        .xsmall()
+                        .label("-")
+                        .disabled(!can_dec)
+                        .on_click(move |_, _, cx| {
+                            AppState::apply(cx, |state| {
+                                state.commit_button_debounce(dec_btn, next_dec)
+                            });
+                        }),
+                )
+                .child(
+                    Button::new("btn-debounce-inc")
+                        .xsmall()
+                        .label("+")
+                        .disabled(!can_inc)
+                        .on_click(move |_, _, cx| {
+                            AppState::apply(cx, |state| {
+                                state.commit_button_debounce(inc_btn, next_inc)
+                            });
+                        }),
+                ),
+        )
 }
 
 fn gesture_directions(
@@ -675,6 +861,179 @@ fn current_action_card(
         picker,
         pal,
     )
+}
+
+fn slot_icon(slot: TriggerSlot) -> Icon {
+    match slot {
+        TriggerSlot::Click => Icon::empty().path("action-icons/circle-dot.svg"),
+        TriggerSlot::DoubleClick => Icon::empty().path("action-icons/mouse-pointer-click.svg"),
+        TriggerSlot::Hold => Icon::empty().path("action-icons/clock.svg"),
+    }
+}
+
+fn trigger_action_card(
+    id: &'static str,
+    caption: gpui::SharedString,
+    slot: TriggerSlot,
+    action: Option<&Action>,
+    picker: ActionPickerContext<'_>,
+    pal: Palette,
+    on_clear: Option<Rc<dyn Fn(&mut Window, &mut Context<MouseModelView>)>>,
+) -> impl IntoElement {
+    let is_open = picker.open && picker.trigger_slot == slot;
+    let view = picker.view.clone();
+    let search = picker.search.clone();
+    let is_opening = !is_open;
+
+    match action {
+        None => BaseButton::new(id)
+            .debug_selector(move || id.to_string())
+            .accessibility_label(caption.clone())
+            .aria_expanded(is_open)
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .rounded(pal.control_radius)
+            .border_1()
+            .border_color(if is_open { rgb(ACCENT_BLUE).into() } else { pal.border })
+            .bg(pal.control)
+            .p_3()
+            .cursor_pointer()
+            .hover(move |card| card.bg(pal.control_hover))
+            .focus_visible(move |card| card.bg(pal.control_hover).border_color(rgb(ACCENT_BLUE)))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        slot_icon(slot)
+                            .size_4()
+                            .text_color(pal.text_muted),
+                    )
+                    .child(
+                        div()
+                            .text_caption()
+                            .text_color(pal.text_muted)
+                            .child(caption),
+                    ),
+            )
+            .on_click(move |_, window, cx| {
+                if is_opening {
+                    search.update(cx, |search, cx| search.set_value("", window, cx));
+                }
+                view.update(cx, |view, cx| {
+                    view.active_trigger_slot = slot;
+                    view.action_picker_open = is_opening;
+                    view.clear_custom_action_drafts(window, cx);
+                    cx.notify();
+                });
+            }),
+        Some(act) => {
+            let accessible_label = localized_action_label(act);
+            let clear_view = picker.view.clone();
+            BaseButton::new(id)
+                .debug_selector(move || id.to_string())
+                .accessibility_label(accessible_label)
+                .aria_expanded(is_open)
+                .flex()
+                .flex_col()
+                .items_stretch()
+                .gap_2()
+                .rounded(pal.control_radius)
+                .border_1()
+                .border_color(if is_open { rgb(ACCENT_BLUE).into() } else { pal.border })
+                .bg(pal.control)
+                .p_3()
+                .cursor_pointer()
+                .hover(move |card| card.bg(pal.control_hover))
+                .focus_visible(move |card| card.bg(pal.control_hover).border_color(rgb(ACCENT_BLUE)))
+                .child(
+                    h_flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap_1p5()
+                                .child(
+                                    slot_icon(slot)
+                                        .size_3p5()
+                                        .text_color(pal.text_muted),
+                                )
+                                .child(
+                                    div()
+                                        .text_caption()
+                                        .text_color(pal.text_muted)
+                                        .child(caption),
+                                ),
+                        )
+                        .children(on_clear.map(|clear_cb| {
+                            let clear_view = clear_view.clone();
+                            BaseButton::new(format!("{id}-clear"))
+                                .accessibility_label(tr!("common.remove"))
+                                .cursor_pointer()
+                                .p_0p5()
+                                .rounded_full()
+                                .text_color(pal.text_muted)
+                                .hover(|style| style.text_color(pal.text_primary))
+                                .child(Icon::new(IconName::Close).size_3())
+                                .on_click(move |_, window, cx| {
+                                    cx.stop_propagation();
+                                    clear_view.update(cx, |view, cx| {
+                                        clear_cb(window, cx);
+                                        if view.active_trigger_slot == slot {
+                                            view.close_action_picker();
+                                        }
+                                        cx.notify();
+                                    });
+                                })
+                        })),
+                )
+                .child(
+                    h_flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .child(
+                            h_flex()
+                                .min_w_0()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    svg()
+                                        .path(action_icon_path(act))
+                                        .size_4()
+                                        .flex_none()
+                                        .text_color(pal.text_muted),
+                                )
+                                .child(div().min_w_0().truncate().text_body().child(localized_action_label(act))),
+                        )
+                        .child(
+                            svg()
+                                .path(if is_open {
+                                    "action-icons/chevrons-up.svg"
+                                } else {
+                                    "action-icons/chevrons-down.svg"
+                                })
+                                .size_3()
+                                .flex_none()
+                                .text_color(pal.text_muted),
+                        ),
+                )
+                .on_click(move |_, window, cx| {
+                    if is_opening {
+                        search.update(cx, |search, cx| search.set_value("", window, cx));
+                    }
+                    view.update(cx, |view, cx| {
+                        view.active_trigger_slot = slot;
+                        view.action_picker_open = is_opening;
+                        view.clear_custom_action_drafts(window, cx);
+                        cx.notify();
+                    });
+                })
+        }
+    }
 }
 
 fn gesture_summary_card(picker: ActionPickerContext<'_>, pal: Palette) -> impl IntoElement {
@@ -1001,6 +1360,8 @@ mod tests {
         gesture_maps: &'a BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
         wheel_hold: &'a BTreeSet<ButtonId>,
     ) -> BindingInspectorData<'a> {
+        static DEFAULT_ACTION: std::sync::LazyLock<Action> =
+            std::sync::LazyLock::new(|| default_binding(ButtonId::Back));
         BindingInspectorData {
             selected: Some(MouseControlId::Button(ButtonId::Back)),
             gesture_direction: None,
@@ -1012,6 +1373,11 @@ mod tests {
             editing_app: None,
             overridden: None,
             press_force: None,
+            click_action: &DEFAULT_ACTION,
+            double_click_action: None,
+            hold_action: None,
+            wheel_hold_mode: None,
+            debounce_ms: 400,
         }
     }
 

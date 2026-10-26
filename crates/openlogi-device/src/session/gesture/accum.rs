@@ -3,6 +3,7 @@
 //! which held wheel-hold button the raw wheel belongs to.
 
 use std::num::NonZeroU8;
+use std::time::Instant;
 
 use openlogi_core::binding::{ButtonId, GestureDirection, SwipeAccumulator};
 use tokio::sync::mpsc;
@@ -44,9 +45,16 @@ enum HoldState {
 }
 
 /// Begin a hold for `cid`, its swipe accumulator started fresh.
-fn begin_hold(cid: u16, button: ButtonId, overlap: bool, skip_first_raw_xy: bool) -> HoldState {
+fn begin_hold(
+    cid: u16,
+    button: ButtonId,
+    overlap: bool,
+    skip_first_raw_xy: bool,
+    last_click: Option<Instant>,
+) -> HoldState {
     let mut swipe = SwipeAccumulator::default();
     swipe.begin();
+    swipe.set_last_click(last_click);
     HoldState::Holding {
         cid,
         button,
@@ -62,6 +70,8 @@ fn begin_hold(cid: u16, button: ButtonId, overlap: bool, skip_first_raw_xy: bool
 pub(super) struct CaptureAccum {
     /// The hold owning raw-XY motion, if any (see [`HoldState`]).
     hold: HoldState,
+    /// Last click timestamp per button for double-click detection across holds.
+    last_click: Option<(ButtonId, Instant)>,
     /// The armed gesture sources held in the last event, for edge detection:
     /// a source not previously held that becomes the holder is a fresh touch
     /// (its first raw-XY sample is then stale and discarded).
@@ -154,15 +164,25 @@ impl CaptureAccum {
                     },
                     previous => {
                         // No holder, or the holder released: a released hold that
-                        // never committed a direction is a plain click...
+                        // never committed a direction resolves on release (Click, DoubleClick, or Hold)...
                         if let HoldState::Holding {
                             button, mut swipe, ..
                         } = previous
-                            && swipe.end()
                         {
-                            debug!(%button, "gesture click");
-                            let _ =
-                                sink.send(CapturedInput::Gesture(button, GestureDirection::Click));
+                            if let Some(dir) = swipe.end_direction() {
+                                debug!(%button, ?dir, "gesture release");
+                                if dir == GestureDirection::Click {
+                                    self.last_click = Some((
+                                        button,
+                                        swipe.last_click().unwrap_or_else(Instant::now),
+                                    ));
+                                } else {
+                                    self.last_click = None;
+                                }
+                                let _ = sink.send(CapturedInput::Gesture(button, dir));
+                            } else {
+                                self.last_click = None;
+                            }
                         }
                         // ...and the first still-held source begins (or takes
                         // over) the hold. A source not down in the previous event
@@ -170,12 +190,19 @@ impl CaptureAccum {
                         // discarded; one that was already held has had that
                         // sample dropped during the overlap.
                         match held.first() {
-                            Some(&(cid, button)) => begin_hold(
-                                cid,
-                                button,
-                                held.len() > 1,
-                                !self.gestures_down.contains(&cid),
-                            ),
+                            Some(&(cid, button)) => {
+                                let last = self
+                                    .last_click
+                                    .filter(|(b, _)| *b == button)
+                                    .map(|(_, t)| t);
+                                begin_hold(
+                                    cid,
+                                    button,
+                                    held.len() > 1,
+                                    !self.gestures_down.contains(&cid),
+                                    last,
+                                )
+                            }
                             None => HoldState::Idle,
                         }
                     }
@@ -255,6 +282,7 @@ impl CaptureAccum {
         // arrives outside a hold.
         if let Some(direction) = swipe.accumulate(i32::from(dx), i32::from(dy)) {
             debug!(?direction, %button, "gesture committed");
+            self.last_click = None;
             let _ = sink.send(CapturedInput::Gesture(*button, direction));
         }
     }

@@ -3,7 +3,7 @@
 //! shared by both gesture-capture paths. This is input processing, distinct
 //! from the `Action` vocabulary the parent [`binding`](super) module defines.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::GestureDirection;
 
@@ -118,6 +118,8 @@ pub struct SwipeAccumulator {
     repeat_cross: i32,
     /// When the last motion arrived, to detect the pause that ends a stroke.
     moved_at: Option<Instant>,
+    /// When the last click ended, to detect double-clicks.
+    last_click_at: Option<Instant>,
 }
 
 impl SwipeAccumulator {
@@ -227,13 +229,15 @@ impl SwipeAccumulator {
             Some(GestureDirection::Left) => self.dx = self.dx.max(0),
             Some(GestureDirection::Down) => self.dy = self.dy.min(0),
             Some(GestureDirection::Up) => self.dy = self.dy.max(0),
-            Some(GestureDirection::Click) | None => {}
+            Some(GestureDirection::Click | GestureDirection::DoubleClick | GestureDirection::Hold)
+            | None => {}
         }
         let held_long_enough = self
             .held_since
             .is_some_and(|t| t.elapsed() >= GESTURE_HOLD_FOR_SWIPE);
         if held_long_enough && let Some(dir) = detect_swipe(self.dx, self.dy) {
             self.fired = true;
+            self.last_click_at = None;
             self.last = Some(dir);
             self.repeat = 0;
             self.repeat_cross = 0;
@@ -244,14 +248,67 @@ impl SwipeAccumulator {
         None
     }
 
+    /// Last click timestamp if a click is pending for double-click detection.
+    #[must_use]
+    pub const fn last_click(&self) -> Option<Instant> {
+        self.last_click_at
+    }
+
+    /// Set or restore the last click timestamp for double-click detection.
+    pub fn set_last_click(&mut self, when: Option<Instant>) {
+        self.last_click_at = when;
+    }
+
+    /// End the current hold, returning the resolved direction on release:
+    /// - `None` if a swipe already committed mid-motion, or if there was no hold.
+    /// - `Some(GestureDirection::Hold)` if held without swiping for at least [`LONG_PRESS_THRESHOLD`].
+    /// - `Some(GestureDirection::DoubleClick)` if this click followed a previous click within [`DEFAULT_DOUBLE_CLICK_TIMEOUT`].
+    /// - `Some(GestureDirection::Click)` for a standard single click.
+    pub fn end_direction(&mut self) -> Option<GestureDirection> {
+        self.end_direction_with_timeout(crate::binding::DEFAULT_DOUBLE_CLICK_TIMEOUT)
+    }
+
+    /// End the current hold with a custom double-click timeout window.
+    pub fn end_direction_with_timeout(&mut self, timeout: Duration) -> Option<GestureDirection> {
+        let held_since = self.held_since.take()?;
+        if self.fired {
+            return None;
+        }
+        let now = Instant::now();
+        if now.saturating_duration_since(held_since) >= crate::binding::LONG_PRESS_THRESHOLD {
+            self.last_click_at = None;
+            return Some(GestureDirection::Hold);
+        }
+        if let Some(prev) = self.last_click_at {
+            if now.saturating_duration_since(prev) <= timeout {
+                self.last_click_at = None;
+                return Some(GestureDirection::DoubleClick);
+            }
+        }
+        self.last_click_at = Some(now);
+        Some(GestureDirection::Click)
+    }
+
     /// End the current hold. Returns `true` when an in-progress hold ended
-    /// without committing a swipe — the caller should fire the plain `Click`
-    /// action — and `false` when a swipe already fired mid-motion, or when there
-    /// was no hold to end (a stray release reports no click).
+    /// without committing a swipe — the caller should fire a click/hold action —
+    /// and `false` when a swipe already fired mid-motion, or when there was no
+    /// hold to end.
     pub fn end(&mut self) -> bool {
-        let was_click = self.held_since.is_some() && !self.fired;
-        self.held_since = None;
-        was_click
+        self.end_direction().is_some()
+    }
+
+    /// Test-only seam: backdate the hold past [`LONG_PRESS_THRESHOLD`] to simulate a hold without sleeping.
+    #[doc(hidden)]
+    pub fn backdate_for_hold_test(&mut self) {
+        if self.held_since.is_some() {
+            self.held_since = Instant::now().checked_sub(crate::binding::LONG_PRESS_THRESHOLD * 2);
+        }
+    }
+
+    /// Test-only seam: set the last click timestamp to simulate a rapid second click.
+    #[doc(hidden)]
+    pub fn set_last_click_for_test(&mut self, when: Instant) {
+        self.last_click_at = Some(when);
     }
 
     /// Test-only seam: backdate the current hold so its [`GESTURE_HOLD_FOR_SWIPE`]
@@ -282,7 +339,7 @@ fn along(direction: GestureDirection, dx: i32, dy: i32) -> i32 {
         GestureDirection::Right => dx,
         GestureDirection::Up => dy.saturating_neg(),
         GestureDirection::Down => dy,
-        GestureDirection::Click => 0,
+        GestureDirection::Click | GestureDirection::DoubleClick | GestureDirection::Hold => 0,
     }
 }
 
@@ -291,7 +348,7 @@ fn across(direction: GestureDirection, dx: i32, dy: i32) -> i32 {
     match direction {
         GestureDirection::Left | GestureDirection::Right => dy,
         GestureDirection::Up | GestureDirection::Down => dx,
-        GestureDirection::Click => 0,
+        GestureDirection::Click | GestureDirection::DoubleClick | GestureDirection::Hold => 0,
     }
 }
 
@@ -302,7 +359,7 @@ fn reversal(direction: GestureDirection, dx: i32, dy: i32) -> i32 {
         GestureDirection::Right => dx.saturating_neg(),
         GestureDirection::Up => dy,
         GestureDirection::Down => dy.saturating_neg(),
-        GestureDirection::Click => 0,
+        GestureDirection::Click | GestureDirection::DoubleClick | GestureDirection::Hold => 0,
     }
     .max(0)
 }
@@ -316,7 +373,7 @@ fn continues(direction: GestureDirection, dx: i32, dy: i32) -> bool {
         GestureDirection::Right => dx > 0 && ax >= ay,
         GestureDirection::Up => dy < 0 && ay >= ax,
         GestureDirection::Down => dy > 0 && ay >= ax,
-        GestureDirection::Click => false,
+        GestureDirection::Click | GestureDirection::DoubleClick | GestureDirection::Hold => false,
     }
 }
 
@@ -662,6 +719,34 @@ mod tests {
         acc.backdate_hold_for_test();
         assert!(acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0).is_some());
         assert!(!acc.end(), "a committed swipe must not also click");
+    }
+
+    #[test]
+    fn accumulator_end_direction_distinguishes_click_double_click_and_hold() {
+        let mut acc = SwipeAccumulator::default();
+
+        // 1. Single click
+        acc.begin();
+        assert_eq!(acc.end_direction(), Some(GestureDirection::Click));
+
+        // 2. Rapid double click
+        acc.begin();
+        assert_eq!(acc.end_direction(), Some(GestureDirection::DoubleClick));
+
+        // 3. Third click is a fresh single click
+        acc.begin();
+        assert_eq!(acc.end_direction(), Some(GestureDirection::Click));
+
+        // 4. Hold past LONG_PRESS_THRESHOLD
+        acc.begin();
+        acc.backdate_for_hold_test();
+        assert_eq!(acc.end_direction(), Some(GestureDirection::Hold));
+
+        // 5. Committed swipe returns None on release
+        acc.begin();
+        acc.backdate_hold_for_test();
+        assert!(acc.accumulate(GESTURE_SWIPE_THRESHOLD + 10, 0).is_some());
+        assert_eq!(acc.end_direction(), None);
     }
 
     #[test]

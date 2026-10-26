@@ -306,10 +306,9 @@ pub(super) fn process_input(
                         let awaiting = ActivePress {
                             token: press.token.clone(),
                             behavior: PressBehavior::MultiClickAwaiting {
+                                deadline: released_at + binding.debounce(),
                                 binding,
                                 count: 1,
-                                deadline: released_at
-                                    + openlogi_core::binding::DOUBLE_CLICK_TIMEOUT,
                             },
                             target: press.target.clone(),
                         };
@@ -320,10 +319,9 @@ pub(super) fn process_input(
                             let awaiting = ActivePress {
                                 token: press.token.clone(),
                                 behavior: PressBehavior::MultiClickAwaiting {
+                                    deadline: released_at + binding.debounce(),
                                     binding,
                                     count: 2,
-                                    deadline: released_at
-                                        + openlogi_core::binding::DOUBLE_CLICK_TIMEOUT,
                                 },
                                 target: press.target.clone(),
                             };

@@ -31,19 +31,46 @@ impl Config {
     /// A no-op for a button that cannot hold the wheel
     /// ([`ButtonId::supports_wheel_hold`]) and when the mode already matches.
     pub fn set_wheel_hold(&mut self, device_key: &str, button: ButtonId, enabled: bool) {
-        if !button.supports_wheel_hold() || self.is_wheel_hold(device_key, button) == enabled {
+        self.set_wheel_hold_mode(
+            device_key,
+            button,
+            enabled.then_some(crate::binding::HeldWheel::HorizontalScroll),
+        );
+    }
+
+    /// Set the specific wheel-hold mode (HorizontalScroll, Zoom, or None) for a button.
+    pub fn set_wheel_hold_mode(
+        &mut self,
+        device_key: &str,
+        button: ButtonId,
+        mode: Option<crate::binding::HeldWheel>,
+    ) {
+        if !button.supports_wheel_hold() {
             return;
         }
-        if enabled && self.is_gesture_mode(device_key, button) {
+        let is_currently_mode = self
+            .stored_binding(device_key, button)
+            .and_then(|b| match b {
+                Binding::WheelHold(wh) => Some(wh.wheel()),
+                _ => None,
+            }) == mode;
+        if is_currently_mode {
+            return;
+        }
+        if mode.is_some() && self.is_gesture_mode(device_key, button) {
             self.set_gesture_mode(device_key, button, false);
         }
         let click = self
             .stored_binding(device_key, button)
             .map_or_else(|| default_binding(button), Binding::click_action);
-        let binding = if enabled {
-            Binding::WheelHold(WheelHoldBinding::horizontal_scroll(click))
-        } else {
-            Binding::Single(click)
+        let binding = match mode {
+            Some(crate::binding::HeldWheel::HorizontalScroll) => {
+                Binding::WheelHold(WheelHoldBinding::horizontal_scroll(click))
+            }
+            Some(crate::binding::HeldWheel::Zoom) => {
+                Binding::WheelHold(WheelHoldBinding::zoom(click))
+            }
+            None => Binding::Single(click),
         };
         self.set_binding(device_key, button, binding);
     }

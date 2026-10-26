@@ -55,6 +55,7 @@ fn test_dispatcher() -> (
             action_ring,
         },
         buttons: owner.input(),
+        tokio_handle: None,
     };
     (dispatcher, owner, received)
 }
@@ -79,7 +80,7 @@ fn accumulate_tags_a_committed_swipe_with_the_held_press() {
         None,
         "continuing the same swipe does not repeat"
     );
-    assert_eq!(hold.end(ButtonId::Back), Some((press, false)));
+    assert_eq!(hold.end(ButtonId::Back), Some((press, None)));
 }
 
 #[test]
@@ -140,7 +141,7 @@ fn begin_is_first_wins_while_a_hold_is_active() {
         Some((first.clone(), ButtonId::Back, GestureDirection::Right))
     );
     assert_eq!(hold.end(ButtonId::Forward), None);
-    assert_eq!(hold.end(ButtonId::Back), Some((first, false)));
+    assert_eq!(hold.end(ButtonId::Back), Some((first, None)));
 }
 
 #[test]
@@ -149,7 +150,10 @@ fn end_matches_the_held_button_and_returns_its_token() {
     let press = token(1, ButtonId::Back);
     hold.begin(ButtonId::Back, press.clone());
     assert_eq!(hold.end(ButtonId::Forward), None);
-    assert_eq!(hold.end(ButtonId::Back), Some((press, true)));
+    assert_eq!(
+        hold.end(ButtonId::Back),
+        Some((press, Some(GestureDirection::Click)))
+    );
 }
 
 #[test]

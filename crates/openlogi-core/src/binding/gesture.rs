@@ -24,19 +24,25 @@ pub enum GestureDirection {
     /// A press-and-release that never committed a swipe — the gesture
     /// button's plain-click slot.
     Click,
+    /// A double click without swipe.
+    DoubleClick,
+    /// A press held in place without swiping.
+    Hold,
 }
 
 impl GestureDirection {
-    /// All five direction slots, swipes first and [`Click`](Self::Click) last.
+    /// All direction and click slots, swipes first, then click, double-click, and hold.
     /// Iterated to seed or complete a full gesture map — see
     /// [`Binding::fill_gesture_defaults`](crate::binding::Binding::fill_gesture_defaults)
     /// and [`default_binding_for`](crate::binding::default_binding_for).
-    pub const ALL: [GestureDirection; 5] = [
+    pub const ALL: [GestureDirection; 7] = [
         GestureDirection::Up,
         GestureDirection::Down,
         GestureDirection::Left,
         GestureDirection::Right,
         GestureDirection::Click,
+        GestureDirection::DoubleClick,
+        GestureDirection::Hold,
     ];
 
     /// Human-readable label for popovers and tooltips.
@@ -48,6 +54,8 @@ impl GestureDirection {
             GestureDirection::Left => "Left",
             GestureDirection::Right => "Right",
             GestureDirection::Click => "Click",
+            GestureDirection::DoubleClick => "Double Click",
+            GestureDirection::Hold => "Click & Hold",
         }
     }
 
@@ -60,12 +68,22 @@ impl GestureDirection {
             GestureDirection::Left => "common.left",
             GestureDirection::Right => "common.right",
             GestureDirection::Click => "common.click",
+            GestureDirection::DoubleClick => "common.double_click",
+            GestureDirection::Hold => "common.hold",
         }
     }
 }
 
 impl fmt::Display for GestureDirection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.label())
+        match self {
+            GestureDirection::Up => f.write_str("Up"),
+            GestureDirection::Down => f.write_str("Down"),
+            GestureDirection::Left => f.write_str("Left"),
+            GestureDirection::Right => f.write_str("Right"),
+            GestureDirection::Click => f.write_str("Click"),
+            GestureDirection::DoubleClick => f.write_str("DoubleClick"),
+            GestureDirection::Hold => f.write_str("Hold"),
+        }
     }
 }

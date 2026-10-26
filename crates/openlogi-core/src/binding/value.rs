@@ -13,8 +13,11 @@ use super::gesture::GestureDirection;
 /// action fires.
 pub const LONG_PRESS_THRESHOLD: Duration = Duration::from_millis(500);
 
+/// Default double-click interval within which a second click triggers a double-click action.
+pub const DEFAULT_DOUBLE_CLICK_TIMEOUT: Duration = Duration::from_millis(400);
+
 /// Double-click interval within which a second click triggers a double-click action.
-pub const DOUBLE_CLICK_TIMEOUT: Duration = Duration::from_millis(300);
+pub const DOUBLE_CLICK_TIMEOUT: Duration = DEFAULT_DOUBLE_CLICK_TIMEOUT;
 
 /// Multi-click binding for mouse buttons (click, double-click, optional triple-click, optional hold).
 ///
@@ -30,6 +33,8 @@ pub struct MultiClickBinding {
     triple: Option<Action>,
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "long")]
     hold: Option<Action>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    debounce_ms: Option<u32>,
 }
 
 impl MultiClickBinding {
@@ -41,6 +46,7 @@ impl MultiClickBinding {
             double,
             triple: None,
             hold: None,
+            debounce_ms: None,
         }
     }
 
@@ -52,6 +58,7 @@ impl MultiClickBinding {
             double,
             triple: None,
             hold: Some(hold),
+            debounce_ms: None,
         }
     }
 
@@ -68,6 +75,7 @@ impl MultiClickBinding {
             double,
             triple,
             hold,
+            debounce_ms: None,
         }
     }
 
@@ -93,6 +101,28 @@ impl MultiClickBinding {
     #[must_use]
     pub const fn hold(&self) -> Option<&Action> {
         self.hold.as_ref()
+    }
+
+    /// Configured debounce in milliseconds, if overridden.
+    #[must_use]
+    pub const fn debounce_ms(&self) -> Option<u32> {
+        self.debounce_ms
+    }
+
+    /// Debounce duration, falling back to [`DEFAULT_DOUBLE_CLICK_TIMEOUT`].
+    #[must_use]
+    pub fn debounce(&self) -> Duration {
+        self.debounce_ms
+            .map_or(DEFAULT_DOUBLE_CLICK_TIMEOUT, |ms| {
+                Duration::from_millis(u64::from(ms))
+            })
+    }
+
+    /// Set an explicit debounce override in milliseconds.
+    #[must_use]
+    pub const fn with_debounce(mut self, debounce_ms: Option<u32>) -> Self {
+        self.debounce_ms = debounce_ms;
+        self
     }
 }
 

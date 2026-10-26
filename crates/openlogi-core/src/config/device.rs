@@ -237,6 +237,13 @@ pub struct DeviceConfig {
     /// button is a [`Binding::Single`] of its former `Click`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub disabled_gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    /// Per-button double-click debounce window in milliseconds.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_button_map",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub button_debounce: BTreeMap<ButtonId, u32>,
     /// Per-application binding overlays (P1.4). Keyed by the application
     /// identifier defined by [`ForegroundApp::id`](crate::app::ForegroundApp::id).
     /// When the foreground app's id matches a key here, these bindings take
@@ -450,6 +457,7 @@ impl Default for DeviceConfig {
             links: BTreeMap::new(),
             bindings: BTreeMap::new(),
             disabled_gestures: BTreeMap::new(),
+            button_debounce: BTreeMap::new(),
             per_app_bindings: BTreeMap::new(),
             action_ring: ActionRingConfig::default(),
             dpi_presets: Vec::new(),
@@ -555,6 +563,8 @@ struct RawDeviceConfig {
     /// v4 stash of turned-off gesture maps (see [`DeviceConfig::disabled_gestures`]).
     #[serde(default, deserialize_with = "deserialize_button_map")]
     disabled_gestures: BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    #[serde(default, deserialize_with = "deserialize_button_map")]
+    button_debounce: BTreeMap<ButtonId, u32>,
     /// Legacy v1 per-button single bindings.
     #[serde(default, deserialize_with = "deserialize_button_map")]
     button_bindings: BTreeMap<ButtonId, Action>,
@@ -647,6 +657,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             links: raw.links,
             bindings,
             disabled_gestures: raw.disabled_gestures,
+            button_debounce: raw.button_debounce,
             per_app_bindings: raw.per_app_bindings,
             action_ring: raw.action_ring,
             dpi_presets: raw.dpi_presets,

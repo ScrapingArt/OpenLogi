@@ -4,7 +4,7 @@
 //! and converts callback-thread mouse/key input into the shared action runtime.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
 use std::thread;
@@ -142,19 +142,19 @@ impl HoldState {
             .map(|dir| (held.press.clone(), held.button, dir))
     }
 
-    /// End the hold for `button`, returning its exact token and whether it was a
-    /// click. A swipe returns `false`; a stray release returns `None`.
-    fn end(&mut self, button: ButtonId) -> Option<(PressToken, bool)> {
+    /// End the hold for `button`, returning its exact token and resolved direction.
+    /// A swipe returns `None`; a stray release returns `None`.
+    fn end(&mut self, button: ButtonId) -> Option<(PressToken, Option<GestureDirection>)> {
         let held = self.current.take_if(|held| held.button == button)?;
         let live_ended = self.live_drag.finish();
         if let Some((progress, phase)) = live_ended {
             #[cfg(target_os = "macos")]
             openlogi_inject::post_live_space_drag(progress, phase);
             self.swipe.end();
-            return Some((held.press, false));
+            return Some((held.press, None));
         }
-        let was_click = self.swipe.end();
-        Some((held.press, was_click))
+        let dir = self.swipe.end_direction();
+        Some((held.press, dir))
     }
 
     /// Cancel any in-progress hold without firing anything — used when the OS
@@ -198,6 +198,9 @@ thread_local! {
     static HELD_KEYS: RefCell<HashSet<u16>> = RefCell::new(HashSet::new());
     /// Thread-local wheel debouncer for OS-hook events.
     static HOOK_DEBOUNCER: RefCell<WheelDebouncer> = RefCell::new(WheelDebouncer::default());
+    /// In-progress delayed single-click debounce tasks for hook gesture buttons.
+    static PENDING_HOOK_GESTURES: RefCell<HashMap<ButtonId, tokio::task::JoinHandle<()>>> =
+        RefCell::new(HashMap::new());
 }
 
 /// Whether a button event's physical source may be remapped/suppressed.
@@ -294,6 +297,11 @@ fn handle_button(
                 dispatcher.cancel_stale_hook_press(stale);
             }
             if let Some(press) = dispatcher.try_hook_button_down(id, None, action_target) {
+                PENDING_HOOK_GESTURES.with_borrow_mut(|p| {
+                    if let Some(pending) = p.remove(&id) {
+                        pending.abort();
+                    }
+                });
                 HOLD.with_borrow_mut(|h| h.begin(id, press));
                 return EventDisposition::Suppress;
             }
@@ -303,14 +311,41 @@ fn handle_button(
     } else {
         // Drop the HOLD borrow before any queueing (re-entrancy freeze hazard).
         let ended = HOLD.with_borrow_mut(|h| h.end(id));
-        if let Some((press, was_click)) = ended {
-            if was_click {
+        if let Some((press, dir)) = ended {
+            PENDING_HOOK_GESTURES.with_borrow_mut(|p| {
+                if let Some(pending) = p.remove(&id) {
+                    pending.abort();
+                }
+            });
+            if let Some(dir) = dir {
                 let action = hooks
                     .try_read()
                     .ok()
-                    .map(|m| resolve_gesture_click(&m.gestures, id));
+                    .map(|m| resolve_gesture_direction(&m.gestures, id, dir));
                 if let Some(action) = action {
-                    info!(button = %id, action = %action.label(), "gesture click → executing bound action");
+                    let has_double_click = hooks
+                        .try_read()
+                        .ok()
+                        .map(|m| resolve_gesture_direction(&m.gestures, id, GestureDirection::DoubleClick))
+                        .is_some_and(|a| a != Action::None);
+
+                    if dir == GestureDirection::Click && has_double_click {
+                        if let Some(task) = dispatcher.spawn_delayed_pointer_action(
+                            action.clone(),
+                            None,
+                            pointer_target,
+                            openlogi_core::binding::DOUBLE_CLICK_TIMEOUT,
+                        ) {
+                            info!(button = %id, "deferring hook gesture click for double-click debounce");
+                            PENDING_HOOK_GESTURES.with_borrow_mut(|p| {
+                                p.insert(id, task);
+                            });
+                            dispatcher.try_hook_button_up(id);
+                            return EventDisposition::Suppress;
+                        }
+                    }
+
+                    info!(button = %id, ?dir, action = %action.label(), "gesture release → executing bound action");
                     dispatcher.try_dispatch_while_pressed(&press, &action);
                 }
             }
@@ -428,6 +463,11 @@ fn handle_moved(
 
     let commit = HOLD.with_borrow_mut(|h| h.accumulate(delta_x, delta_y));
     if let Some((press, button, dir)) = commit {
+        PENDING_HOOK_GESTURES.with_borrow_mut(|p| {
+            if let Some(pending) = p.remove(&button) {
+                pending.abort();
+            }
+        });
         let action = hooks.try_read().ok().map(|m| {
             m.gestures
                 .get(&button)
@@ -543,6 +583,7 @@ pub fn start(
                 }
                 MouseEvent::CaptureInterrupted => {
                     HOLD.with_borrow_mut(HoldState::cancel);
+                    PENDING_HOOK_GESTURES.with_borrow_mut(|p| p.drain().for_each(|(_, h)| h.abort()));
                     HELD_KEYS.with_borrow_mut(HashSet::clear);
                     HOOK_DEBOUNCER.with_borrow_mut(WheelDebouncer::reset);
                     dispatcher.cancel_hook_thread_buttons();
@@ -700,6 +741,19 @@ fn resolve_gesture_click(
         .get(&id)
         .and_then(|m| m.get(&GestureDirection::Click).cloned())
         .unwrap_or_else(|| default_binding(id))
+}
+
+fn resolve_gesture_direction(
+    gestures: &BTreeMap<ButtonId, BTreeMap<GestureDirection, Action>>,
+    id: ButtonId,
+    dir: GestureDirection,
+) -> Action {
+    if let Some(map) = gestures.get(&id) {
+        if let Some(act) = map.get(&dir).cloned().filter(|a| *a != Action::None) {
+            return act;
+        }
+    }
+    resolve_gesture_click(gestures, id)
 }
 
 /// Whether `action` is just `id`'s own native event — i.e. the button is mapped

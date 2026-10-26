@@ -6,7 +6,9 @@ use std::collections::HashMap;
 use std::num::NonZeroU8;
 use std::time::Instant;
 
-use openlogi_core::binding::{Action, Binding, ButtonId, HeldWheel, default_binding};
+use openlogi_core::binding::{
+    Action, Binding, ButtonId, GestureDirection, HeldWheel, default_binding,
+};
 use openlogi_core::config::ThumbwheelSensitivity;
 use openlogi_core::scroll::ScrollDelta;
 use openlogi_hid::CapturedInput;
@@ -96,6 +98,11 @@ impl SessionWheels {
     }
 }
 
+struct PendingDebounce {
+    task: tokio::task::JoinHandle<()>,
+    second_down: bool,
+}
+
 /// Input routing plus the per-session state retained between
 /// captured events. Capture-session lifecycle remains owned by the parent.
 pub(super) struct InputDispatcher {
@@ -103,6 +110,7 @@ pub(super) struct InputDispatcher {
     outputs: GestureOutputs,
     wheels: SessionWheels,
     held_presses: HeldPresses,
+    pending_clicks: HashMap<(HidppSessionId, ButtonId), PendingDebounce>,
 }
 
 impl InputDispatcher {
@@ -113,6 +121,7 @@ impl InputDispatcher {
             outputs,
             wheels: SessionWheels::default(),
             held_presses: HeldPresses::default(),
+            pending_clicks: HashMap::default(),
         }
     }
 
@@ -142,6 +151,14 @@ impl InputDispatcher {
         self.outputs.cancel_session(session);
         self.wheels.cancel_session(session);
         self.held_presses.cancel_session(session);
+        self.pending_clicks.retain(|(candidate, _), debounce| {
+            if candidate == session {
+                debounce.task.abort();
+                false
+            } else {
+                true
+            }
+        });
     }
 
     /// Route one captured input from `session` to its bound action or
@@ -157,30 +174,60 @@ impl InputDispatcher {
             return;
         }
         match input {
-            CapturedInput::Gesture(button, direction) => {
+            CapturedInput::Gesture(button, mut direction) => {
                 let Some(press) = self.held_presses.get(session, button) else {
                     debug!(key, %button, ?direction, "gesture from a canceled button lifecycle — ignored");
                     return;
                 };
-                if let Some(action) = plan
-                    .gesture_bindings
-                    .get(&button)
-                    .or_else(|| plan.side_gesture_bindings.get(&button))
-                    .and_then(|map| map.get(&direction))
-                {
-                    debug!(key, %button, ?direction, action = %action.label(), "gesture → action");
-                    if !self
-                        .outputs
-                        .actions
-                        .try_dispatch_while_pressed(press, action)
-                    {
-                        debug!(key, %button, ?direction, "gesture press no longer active — ignored");
-                    }
-                } else {
+                let pending = self.pending_clicks.remove(&(session.clone(), button));
+                if let Some(p) = &pending {
+                    p.task.abort();
+                }
+                if direction == GestureDirection::Click && pending.is_some_and(|p| p.second_down) {
+                    direction = GestureDirection::DoubleClick;
+                }
+                let Some(action) = resolve_gesture_action(plan, button, direction) else {
                     debug!(key, %button, ?direction, "gesture with no binding — ignored");
+                    return;
+                };
+
+                let has_double_click = resolve_gesture_action(plan, button, GestureDirection::DoubleClick)
+                    .is_some_and(|a| *a != Action::None);
+
+                if direction == GestureDirection::Click && has_double_click {
+                    let debounce = plan.debounce_for(button);
+                    if let Some(task) = self.outputs.actions.spawn_delayed_pointer_action(
+                        action.clone(),
+                        Some(key.to_owned()),
+                        plan.pointer_target,
+                        debounce,
+                    ) {
+                        debug!(key, %button, ?debounce, "deferring gesture click for double-click debounce");
+                        self.pending_clicks.insert(
+                            (session.clone(), button),
+                            PendingDebounce {
+                                task,
+                                second_down: false,
+                            },
+                        );
+                        return;
+                    }
+                }
+
+                debug!(key, %button, ?direction, action = %action.label(), "gesture → action");
+                if !self
+                    .outputs
+                    .actions
+                    .try_dispatch_while_pressed(press, action)
+                {
+                    debug!(key, %button, ?direction, "gesture press no longer active — ignored");
                 }
             }
             CapturedInput::ButtonDown(button) => {
+                if let Some(pending) = self.pending_clicks.get_mut(&(session.clone(), button)) {
+                    pending.task.abort();
+                    pending.second_down = true;
+                }
                 // A raw-XY gesture source owns its click/swipe map; its physical
                 // lifecycle is still tracked, but it must not also fire the
                 // single-action projection on down.
@@ -354,6 +401,27 @@ fn main_wheel_scroll(
         -notches
     };
     ScrollDelta::wheel_ticks(0.0, upward)
+}
+
+fn resolve_gesture_action<'a>(
+    plan: &'a DispatchPlan,
+    button: ButtonId,
+    direction: GestureDirection,
+) -> Option<&'a Action> {
+    plan.gesture_bindings
+        .get(&button)
+        .or_else(|| plan.side_gesture_bindings.get(&button))
+        .and_then(|map| {
+            map.get(&direction)
+                .filter(|a| **a != Action::None)
+                .or_else(|| {
+                    if matches!(direction, GestureDirection::DoubleClick | GestureDirection::Hold) {
+                        map.get(&GestureDirection::Click)
+                    } else {
+                        None
+                    }
+                })
+        })
 }
 
 #[cfg(test)]

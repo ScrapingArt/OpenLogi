@@ -52,6 +52,8 @@ pub(crate) fn gesture_direction_icon(direction: GestureDirection) -> Icon {
         GestureDirection::Left => Icon::new(IconName::ArrowLeft),
         GestureDirection::Right => Icon::new(IconName::ArrowRight),
         GestureDirection::Click => Icon::empty().path("action-icons/circle-dot.svg"),
+        GestureDirection::DoubleClick => Icon::empty().path("action-icons/mouse-pointer-click.svg"),
+        GestureDirection::Hold => Icon::empty().path("action-icons/clock.svg"),
     }
 }
 
@@ -70,7 +72,7 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::Undo => "action-icons/undo-2.svg",
         Action::Redo => "action-icons/redo-2.svg",
         Action::SelectAll | Action::Workflow(_) => "action-icons/list-checks.svg",
-        Action::Find => "action-icons/search.svg",
+        Action::Find | Action::SmartZoom => "action-icons/search.svg",
         Action::Save => "action-icons/save.svg",
         Action::BrowserBack => "action-icons/arrow-left.svg",
         Action::BrowserForward => "action-icons/arrow-right.svg",
@@ -86,7 +88,6 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::NextDesktop => "action-icons/square-arrow-right.svg",
         Action::ShowDesktop => "action-icons/monitor.svg",
         Action::LaunchpadShow | Action::OpenApplication(_) => "action-icons/grid-3x3.svg",
-        Action::SmartZoom => "action-icons/search.svg",
         Action::LockScreen => "action-icons/lock.svg",
         Action::Screenshot | Action::CaptureRegion => "action-icons/camera.svg",
         Action::Sleep => "action-icons/moon.svg",

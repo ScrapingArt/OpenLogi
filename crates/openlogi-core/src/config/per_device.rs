@@ -42,6 +42,41 @@ impl Config {
             .insert(button, binding);
     }
 
+    /// Debounce duration in milliseconds configured for `button` on `device_key`,
+    /// or None if using default.
+    #[must_use]
+    pub fn button_debounce_ms(&self, device_key: &str, button: ButtonId) -> Option<u32> {
+        self.devices
+            .get(device_key)
+            .and_then(|d| d.button_debounce.get(&button).copied())
+    }
+
+    /// Debounce duration configured for `button` on `device_key`, falling back to default.
+    #[must_use]
+    pub fn button_debounce(&self, device_key: &str, button: ButtonId) -> std::time::Duration {
+        self.button_debounce_ms(device_key, button)
+            .map_or(crate::binding::DEFAULT_DOUBLE_CLICK_TIMEOUT, |ms| {
+                std::time::Duration::from_millis(u64::from(ms))
+            })
+    }
+
+    /// Set debounce duration in milliseconds for `button` on `device_key`.
+    pub fn set_button_debounce(&mut self, device_key: &str, button: ButtonId, debounce_ms: u32) {
+        let clamped = debounce_ms.clamp(150, 1000);
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .button_debounce
+            .insert(button, clamped);
+    }
+
+    /// Clear button debounce override for `button` on `device_key`.
+    pub fn clear_button_debounce(&mut self, device_key: &str, button: ButtonId) {
+        if let Some(dev) = self.devices.get_mut(device_key) {
+            dev.button_debounce.remove(&button);
+        }
+    }
+
     /// Actions Ring settings for `device_key`, falling back to defaults when
     /// the device has no saved ring configuration.
     #[must_use]

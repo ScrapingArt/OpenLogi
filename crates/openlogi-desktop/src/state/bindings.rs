@@ -628,4 +628,224 @@ impl AppState {
         self.persist_and_reload("gesture binding");
         events
     }
+
+    pub fn button_triggers(
+        &self,
+        button: ButtonId,
+    ) -> (Action, Option<Action>, Option<Action>, Option<Action>) {
+        let Some(key) = self.current_record().and_then(DeviceRecord::persistent_config_key) else {
+            let default = self
+                .bindings
+                .button_bindings
+                .get(&button)
+                .cloned()
+                .unwrap_or_else(|| openlogi_core::binding::default_binding(button));
+            return (default, None, None, None);
+        };
+        let bindings = self.config.stored_bindings(key);
+        let binding = bindings.get(&button);
+        match binding {
+            Some(Binding::MultiClick(b)) => (
+                b.click().clone(),
+                Some(b.double().clone()),
+                b.triple().cloned(),
+                b.hold().cloned(),
+            ),
+            Some(Binding::LongPress(b)) => (b.short().clone(), None, None, Some(b.long().clone())),
+            Some(Binding::Single(a)) => (a.clone(), None, None, None),
+            Some(Binding::WheelHold(b)) => (b.click().clone(), None, None, None),
+            Some(b @ Binding::Gesture(_)) => (b.click_action(), None, None, None),
+            None => (openlogi_core::binding::default_binding(button), None, None, None),
+        }
+    }
+
+    pub fn button_multi_click(&self, button: ButtonId) -> (Action, Option<Action>, Option<Action>) {
+        let (click, double, _triple, hold) = self.button_triggers(button);
+        (click, double, hold)
+    }
+
+    pub fn button_wheel_hold_mode(&self, button: ButtonId) -> Option<openlogi_core::binding::HeldWheel> {
+        let key = self.current_record().and_then(DeviceRecord::persistent_config_key)?;
+        let bindings = self.config.stored_bindings(key);
+        match bindings.get(&button)? {
+            Binding::WheelHold(b) => Some(b.wheel()),
+            _ => None,
+        }
+    }
+
+    pub fn commit_trigger_binding(
+        &mut self,
+        button: ButtonId,
+        slot: TriggerSlot,
+        action: Option<Action>,
+    ) -> StateEvents {
+        let events = self.for_current_device(StateEvent::BindingsChanged);
+        let (click, double, triple, hold) = self.button_triggers(button);
+        let wheel_mode = self.button_wheel_hold_mode(button);
+        let new_binding =
+            resolve_trigger_binding(slot, action, click, double, triple, hold, wheel_mode);
+
+        self.bindings.button_bindings.insert(button, new_binding.click_action());
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
+            debug!(
+                ?button,
+                "no persistent device key — binding kept in memory only"
+            );
+            return events;
+        };
+
+        self.config.edit(|config| {
+            config.set_binding(&key, button, new_binding);
+        });
+        self.refresh_binding_projections();
+        self.persist_and_reload("trigger binding");
+        events
+    }
+
+    pub fn commit_wheel_hold_mode(
+        &mut self,
+        button: ButtonId,
+        mode: Option<openlogi_core::binding::HeldWheel>,
+    ) -> StateEvents {
+        let events = self.for_current_device(StateEvent::BindingsChanged);
+        if self.editing_app().is_some() {
+            return events;
+        }
+        if mode.is_some()
+            && !self
+                .current_record()
+                .and_then(|record| record.capabilities)
+                .is_some_and(|caps| caps.virtual_thumbwheel)
+        {
+            debug!("wheel-hold requires measured raw-wheel support");
+            return events;
+        }
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
+            return events;
+        };
+        self.config.edit(|config| {
+            config.set_wheel_hold_mode(&key, button, mode);
+        });
+        self.refresh_binding_projections();
+        self.persist_and_reload("wheel hold mode");
+        events
+    }
+
+    pub fn button_debounce_ms(&self, button: ButtonId) -> u32 {
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+        else {
+            return 400;
+        };
+        self.config
+            .button_debounce_ms(key, button)
+            .unwrap_or(400)
+    }
+
+    pub fn commit_button_debounce(&mut self, button: ButtonId, debounce_ms: u32) -> StateEvents {
+        let events = self.for_current_device(StateEvent::BindingsChanged);
+        let Some(key) = self
+            .current_record()
+            .and_then(DeviceRecord::persistent_config_key)
+            .map(str::to_string)
+        else {
+            return events;
+        };
+        self.config.edit(|config| {
+            config.set_button_debounce(&key, button, debounce_ms);
+        });
+        self.persist_and_reload("button debounce");
+        events
+    }
+}
+
+fn resolve_trigger_binding(
+    slot: TriggerSlot,
+    action: Option<Action>,
+    click: Action,
+    double: Option<Action>,
+    triple: Option<Action>,
+    hold: Option<Action>,
+    wheel_mode: Option<openlogi_core::binding::HeldWheel>,
+) -> Binding {
+    match slot {
+        TriggerSlot::Click => {
+            let new_click = action.unwrap_or(click);
+            if let Some(wh) = wheel_mode {
+                match wh {
+                    openlogi_core::binding::HeldWheel::HorizontalScroll => {
+                        Binding::WheelHold(WheelHoldBinding::horizontal_scroll(new_click))
+                    }
+                    openlogi_core::binding::HeldWheel::Zoom => {
+                        Binding::WheelHold(WheelHoldBinding::zoom(new_click))
+                    }
+                }
+            } else if let Some(d) = double {
+                Binding::MultiClick(openlogi_core::binding::MultiClickBinding::with_triple_and_hold(
+                    new_click,
+                    d,
+                    triple,
+                    hold,
+                ))
+            } else if let Some(h) = hold {
+                Binding::LongPress(openlogi_core::binding::LongPressBinding::new(new_click, h))
+            } else {
+                Binding::Single(new_click)
+            }
+        }
+        TriggerSlot::DoubleClick => {
+            if let Some(new_double) = action {
+                Binding::MultiClick(openlogi_core::binding::MultiClickBinding::with_triple_and_hold(
+                    click,
+                    new_double,
+                    triple,
+                    hold,
+                ))
+            } else if let Some(h) = hold {
+                Binding::LongPress(openlogi_core::binding::LongPressBinding::new(click, h))
+            } else {
+                Binding::Single(click)
+            }
+        }
+        TriggerSlot::Hold => {
+            if let Some(new_hold) = action {
+                if let Some(d) = double {
+                    Binding::MultiClick(openlogi_core::binding::MultiClickBinding::with_triple_and_hold(
+                        click,
+                        d,
+                        triple,
+                        Some(new_hold),
+                    ))
+                } else {
+                    Binding::LongPress(openlogi_core::binding::LongPressBinding::new(click, new_hold))
+                }
+            } else if let Some(d) = double {
+                Binding::MultiClick(openlogi_core::binding::MultiClickBinding::with_triple_and_hold(
+                    click,
+                    d,
+                    triple,
+                    None,
+                ))
+            } else {
+                Binding::Single(click)
+            }
+        }
+    }
+}
+
+/// A specific trigger slot for multi-action button configuration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TriggerSlot {
+    Click,
+    DoubleClick,
+    Hold,
 }

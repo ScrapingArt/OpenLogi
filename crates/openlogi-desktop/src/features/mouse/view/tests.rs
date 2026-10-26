@@ -212,6 +212,8 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
         let bindings = BTreeMap::new();
         let entity = cx.entity();
 
+        static DEFAULT_ACTION: std::sync::LazyLock<Action> =
+            std::sync::LazyLock::new(|| default_binding(ButtonId::MiddleClick));
         binding_inspector(
             BindingInspectorData {
                 selected: Some(MouseControlId::Button(ButtonId::MiddleClick)),
@@ -224,9 +226,15 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
                 editing_app: None,
                 overridden: None,
                 press_force: None,
+                click_action: &DEFAULT_ACTION,
+                double_click_action: None,
+                hold_action: None,
+                wheel_hold_mode: None,
+                debounce_ms: 400,
             },
             ActionPickerContext {
                 open: true,
+                trigger_slot: TriggerSlot::Click,
                 search: &view.action_search,
                 shortcut_input: &view.custom_shortcut_input,
                 application_input: &view.custom_application_input,

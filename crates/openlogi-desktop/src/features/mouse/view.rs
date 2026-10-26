@@ -28,7 +28,7 @@ use super::leader_lines::{Geometry as LeaderGeometry, Label, paint as paint_lead
 use crate::app::{glow_canvas, keyboard_glow};
 use crate::features::profiles::{profile_canvas_status, profile_name};
 use crate::services::assets::{GlowGeometry, ResolvedAsset};
-use crate::state::{AppState, DeviceKey, DeviceRecord, StateEvent};
+use crate::state::{AppState, DeviceKey, DeviceRecord, StateEvent, TriggerSlot};
 use crate::ui::theme::{self, ACCENT_BLUE};
 
 const SIDE_GAP: f32 = 24.;
@@ -134,7 +134,8 @@ pub struct MouseModelView {
     selected: Option<MouseControlId>,
     /// The gesture direction whose action is open in the fixed inspector.
     gesture_active_dir: Option<GestureDirection>,
-    action_picker_open: bool,
+    pub(super) action_picker_open: bool,
+    pub(super) active_trigger_slot: TriggerSlot,
     action_search: Entity<InputState>,
     pub(super) custom_shortcut_input: Entity<InputState>,
     pub(super) custom_application_input: Entity<InputState>,
@@ -200,6 +201,7 @@ impl MouseModelView {
             selected: None,
             gesture_active_dir: None,
             action_picker_open: false,
+            active_trigger_slot: TriggerSlot::Click,
             action_search,
             custom_shortcut_input,
             custom_application_input,
@@ -252,6 +254,7 @@ impl MouseModelView {
         self.selected = None;
         self.gesture_active_dir = None;
         self.action_picker_open = false;
+        self.active_trigger_slot = TriggerSlot::Click;
     }
 
     pub(super) fn select(&mut self, control: MouseControlId) {
@@ -259,6 +262,7 @@ impl MouseModelView {
             self.selected = Some(control);
             self.gesture_active_dir = None;
             self.action_picker_open = false;
+            self.active_trigger_slot = TriggerSlot::Click;
         }
     }
 }
@@ -409,6 +413,32 @@ impl Render for MouseModelView {
             }))
             .child(hotspots_layer);
 
+        let (multi_click_action, double_click_action, hold_action) = match self.selected {
+            Some(MouseControlId::Button(button)) => {
+                AppState::try_read(cx).map_or_else(
+                    || (openlogi_core::binding::default_binding(button), None, None),
+                    |state| state.button_multi_click(button),
+                )
+            }
+            _ => (
+                openlogi_core::binding::default_binding(ButtonId::MiddleClick),
+                None,
+                None,
+            ),
+        };
+        let wheel_hold_mode = match self.selected {
+            Some(MouseControlId::Button(button)) => {
+                AppState::try_read(cx).and_then(|state| state.button_wheel_hold_mode(button))
+            }
+            _ => None,
+        };
+        let debounce_ms = match self.selected {
+            Some(MouseControlId::Button(button)) => {
+                AppState::try_read(cx).map(|state| state.button_debounce_ms(button)).unwrap_or(400)
+            }
+            _ => 400,
+        };
+
         let inspector = binding_inspector(
             BindingInspectorData {
                 selected: self.selected,
@@ -421,9 +451,15 @@ impl Render for MouseModelView {
                 editing_app: editing_app.as_deref(),
                 overridden,
                 press_force: PressForce::of(force_sensing.as_ref(), self.force_sensing.as_ref()),
+                click_action: &multi_click_action,
+                double_click_action: double_click_action.as_ref(),
+                hold_action: hold_action.as_ref(),
+                wheel_hold_mode,
+                debounce_ms,
             },
             ActionPickerContext {
                 open: self.action_picker_open,
+                trigger_slot: self.active_trigger_slot,
                 search: &self.action_search,
                 shortcut_input: &self.custom_shortcut_input,
                 application_input: &self.custom_application_input,

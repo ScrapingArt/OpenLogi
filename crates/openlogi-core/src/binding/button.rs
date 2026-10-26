@@ -140,17 +140,10 @@ impl ButtonId {
 
     /// Whether holding this button may turn the main wheel into a virtual
     /// thumb wheel or pinch-to-zoom ([`Binding::WheelHold`](super::Binding::WheelHold)).
-    /// Back, Forward, Middle Click, DPI Toggle, and Gesture Button are supported.
+    /// Back and Forward are the eligible hardware controls.
     #[must_use]
     pub fn supports_wheel_hold(self) -> bool {
-        matches!(
-            self,
-            ButtonId::MiddleClick
-                | ButtonId::Back
-                | ButtonId::Forward
-                | ButtonId::DpiToggle
-                | ButtonId::GestureButton
-        )
+        matches!(self, ButtonId::Back | ButtonId::Forward)
     }
 
     /// Whether this button is a HID++ gesture source — a control that is

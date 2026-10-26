@@ -856,3 +856,109 @@ async fn a_pointer_only_plan_refresh_keeps_a_held_gesture() {
     scroll.shutdown();
     actions.shutdown();
 }
+
+#[tokio::test]
+async fn gesture_double_click_debounces_single_click() {
+    use crate::runtime::scroll::{ScrollPreferences, ScrollRuntime};
+
+    let (ring, mut ring_rx) = tokio::sync::mpsc::unbounded_channel();
+    let device_access = crate::hardware::DeviceAccess {
+        channel: Arc::default(),
+        registry: openlogi_hid::ChannelRegistry::default(),
+        receiver_access: crate::receiver_access::ReceiverAccess::default(),
+        device_io: openlogi_hid::device_io_channel().1,
+        transport_turns: crate::hardware::TransportTurns::default(),
+    };
+    let mut actions =
+        crate::runtime::ActionRuntime::new(Arc::default(), Arc::default(), device_access, ring)
+            .unwrap();
+    let mut scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
+        false,
+        VerticalScrollSensitivity::default(),
+    )))
+    .unwrap();
+    let mut dispatcher = InputDispatcher::new(GestureOutputs::new(
+        actions.dispatcher(),
+        scroll.input(),
+        Arc::default(),
+    ));
+
+    let mut configured = plan();
+    configured.dispatch.gesture_bindings.insert(
+        ButtonId::GestureButton,
+        [
+            (GestureDirection::Click, Action::ShowActionsRing),
+            (GestureDirection::DoubleClick, Action::Copy),
+        ]
+        .into(),
+    );
+    let session = live_session_from_plan(1, configured);
+    let id = session.id().clone();
+
+    // First click: ButtonDown -> Gesture(Click) -> ButtonUp
+    dispatcher.dispatch(
+        &id,
+        session.dispatch(),
+        CapturedInput::ButtonDown(ButtonId::GestureButton),
+    );
+    dispatcher.dispatch(
+        &id,
+        session.dispatch(),
+        CapturedInput::Gesture(ButtonId::GestureButton, GestureDirection::Click),
+    );
+    dispatcher.dispatch(
+        &id,
+        session.dispatch(),
+        CapturedInput::ButtonUp(ButtonId::GestureButton),
+    );
+
+    // Actions Ring must NOT be sent yet because debounce timer is waiting
+    assert!(ring_rx.try_recv().is_err(), "single click must be debounced");
+
+    // Second click within timeout: ButtonDown -> Gesture(DoubleClick) -> ButtonUp
+    dispatcher.dispatch(
+        &id,
+        session.dispatch(),
+        CapturedInput::ButtonDown(ButtonId::GestureButton),
+    );
+    dispatcher.dispatch(
+        &id,
+        session.dispatch(),
+        CapturedInput::Gesture(ButtonId::GestureButton, GestureDirection::DoubleClick),
+    );
+    dispatcher.dispatch(
+        &id,
+        session.dispatch(),
+        CapturedInput::ButtonUp(ButtonId::GestureButton),
+    );
+
+    // Wait past the debounce timeout
+    tokio::time::sleep(openlogi_core::binding::DOUBLE_CLICK_TIMEOUT + Duration::from_millis(50)).await;
+
+    // Actions Ring was cancelled and must never have been sent!
+    assert!(ring_rx.try_recv().is_err(), "debounced click must be cancelled on double click");
+
+    // Lone single click without a second click fires after debounce timeout:
+    dispatcher.dispatch(
+        &id,
+        session.dispatch(),
+        CapturedInput::ButtonDown(ButtonId::GestureButton),
+    );
+    dispatcher.dispatch(
+        &id,
+        session.dispatch(),
+        CapturedInput::Gesture(ButtonId::GestureButton, GestureDirection::Click),
+    );
+    dispatcher.dispatch(
+        &id,
+        session.dispatch(),
+        CapturedInput::ButtonUp(ButtonId::GestureButton),
+    );
+
+    assert!(ring_rx.try_recv().is_err(), "single click must be debounced initially");
+    tokio::time::sleep(openlogi_core::binding::DOUBLE_CLICK_TIMEOUT + Duration::from_millis(50)).await;
+    assert!(ring_rx.try_recv().is_ok(), "single click fires after timeout expires");
+
+    scroll.shutdown();
+    actions.shutdown();
+}
