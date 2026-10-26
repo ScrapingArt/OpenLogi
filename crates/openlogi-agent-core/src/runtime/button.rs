@@ -14,7 +14,9 @@ use std::sync::mpsc;
 use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
-use openlogi_core::binding::{Action, Binding, ButtonId, LONG_PRESS_THRESHOLD};
+use openlogi_core::binding::{
+    Action, Binding, ButtonId, LONG_PRESS_THRESHOLD, MultiClickBinding,
+};
 use tracing::warn;
 
 use super::ActionDispatchTarget;
@@ -198,6 +200,18 @@ enum PressBehavior {
     /// The wheel moved during the press, which made it a virtual thumb wheel;
     /// release fires nothing.
     WheelHoldScrolled,
+    /// Multi-click pending while button is held down.
+    MultiClickPending {
+        binding: MultiClickBinding,
+        count: u8,
+        hold_deadline: Option<Instant>,
+    },
+    /// Awaiting consecutive click within double-click window.
+    MultiClickAwaiting {
+        binding: MultiClickBinding,
+        count: u8,
+        deadline: Instant,
+    },
 }
 
 impl PressBehavior {
@@ -214,12 +228,19 @@ impl PressBehavior {
             Some(Binding::WheelHold(binding)) => Self::WheelHoldPending {
                 click: binding.click().clone(),
             },
+            Some(Binding::MultiClick(binding)) => Self::MultiClickPending {
+                binding: binding.clone(),
+                count: 1,
+                hold_deadline: binding.hold().map(|_| pressed_at + LONG_PRESS_THRESHOLD),
+            },
         }
     }
 
     fn deadline(&self) -> Option<Instant> {
         match self {
-            Self::LongPressPending { deadline, .. } => Some(*deadline),
+            Self::LongPressPending { deadline, .. }
+            | Self::MultiClickAwaiting { deadline, .. } => Some(*deadline),
+            Self::MultiClickPending { hold_deadline, .. } => *hold_deadline,
             Self::LifecycleOnly
             | Self::Immediate(_)
             | Self::LongPressFired
@@ -235,7 +256,9 @@ impl PressBehavior {
             | Self::LongPressPending { .. }
             | Self::LongPressFired
             | Self::WheelHoldPending { .. }
-            | Self::WheelHoldScrolled => None,
+            | Self::WheelHoldScrolled
+            | Self::MultiClickPending { .. }
+            | Self::MultiClickAwaiting { .. } => None,
         }
     }
 
@@ -246,7 +269,9 @@ impl PressBehavior {
             Self::LifecycleOnly
             | Self::Immediate(_)
             | Self::LongPressFired
-            | Self::WheelHoldScrolled => None,
+            | Self::WheelHoldScrolled
+            | Self::MultiClickPending { .. }
+            | Self::MultiClickAwaiting { .. } => None,
         }
     }
 
@@ -259,15 +284,45 @@ impl PressBehavior {
     }
 
     fn fire_long(&mut self, now: Instant) -> Option<Action> {
-        let Self::LongPressPending { long, deadline, .. } = self else {
-            return None;
-        };
-        if now < *deadline {
-            return None;
+        match self {
+            Self::LongPressPending { long, deadline, .. } => {
+                if now < *deadline {
+                    return None;
+                }
+                let action = long.clone();
+                *self = Self::LongPressFired;
+                Some(action)
+            }
+            Self::MultiClickPending {
+                binding,
+                hold_deadline: Some(deadline),
+                ..
+            } => {
+                if now < *deadline {
+                    return None;
+                }
+                let action = binding.hold()?.clone();
+                *self = Self::LongPressFired;
+                Some(action)
+            }
+            Self::MultiClickAwaiting {
+                binding,
+                count,
+                deadline,
+            } => {
+                if now < *deadline {
+                    return None;
+                }
+                let action = if *count >= 2 {
+                    binding.double().clone()
+                } else {
+                    binding.click().clone()
+                };
+                *self = Self::LongPressFired;
+                Some(action)
+            }
+            _ => None,
         }
-        let action = long.clone();
-        *self = Self::LongPressFired;
-        Some(action)
     }
 }
 
@@ -298,6 +353,22 @@ impl ActivePress {
 
     fn fire_long(&mut self, now: Instant) -> Option<Action> {
         self.behavior.fire_long(now)
+    }
+
+    pub(crate) fn multi_click_count(&self) -> u8 {
+        match &self.behavior {
+            PressBehavior::MultiClickPending { count, .. }
+            | PressBehavior::MultiClickAwaiting { count, .. } => *count,
+            _ => 0,
+        }
+    }
+
+    pub(crate) fn multi_click_binding(&self) -> Option<&MultiClickBinding> {
+        match &self.behavior {
+            PressBehavior::MultiClickPending { binding, .. }
+            | PressBehavior::MultiClickAwaiting { binding, .. } => Some(binding),
+            _ => None,
+        }
     }
 }
 
@@ -386,6 +457,16 @@ impl ButtonState {
         self.active.remove(key)
     }
 
+    fn take_awaiting_multi_click(&mut self, key: &PressKey) -> Option<ActivePress> {
+        if let Some(press) = self.active.get(key)
+            && matches!(press.behavior, PressBehavior::MultiClickAwaiting { .. })
+        {
+            self.active.remove(key)
+        } else {
+            None
+        }
+    }
+
     fn active(&self, token: &PressToken) -> Option<&ActivePress> {
         self.active
             .get(&token.key)
@@ -439,7 +520,7 @@ impl ButtonState {
         &mut self,
         tokens: &[PressToken],
         now: Instant,
-    ) -> Vec<(ActivePress, Action)> {
+    ) -> Vec<(ActivePress, Action, bool)> {
         tokens
             .iter()
             .filter_map(|token| {
@@ -447,7 +528,14 @@ impl ButtonState {
                 if press.token != *token {
                     return None;
                 }
-                press.fire_long(now).map(|action| (press.clone(), action))
+                let was_awaiting =
+                    matches!(press.behavior, PressBehavior::MultiClickAwaiting { .. });
+                let action = press.fire_long(now)?;
+                let cloned = press.clone();
+                if was_awaiting {
+                    self.active.remove(&token.key);
+                }
+                Some((cloned, action, was_awaiting))
             })
             .collect()
     }

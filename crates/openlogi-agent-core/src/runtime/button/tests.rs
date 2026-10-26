@@ -1122,3 +1122,108 @@ fn shutdown_deadline_includes_a_blocked_terminal_handler() {
     assert!(started.elapsed() < Duration::from_millis(200));
     let _ = release_tx.send(());
 }
+
+#[test]
+fn double_click_fires_double_action() {
+    let binding = Binding::MultiClick(MultiClickBinding::new(
+        Action::Copy,
+        Action::SmartZoom,
+    ));
+    let mut state = ButtonState::default();
+    let mut events = Vec::new();
+
+    // 1st press down & up
+    let press1 = hook_press_bound(1, &binding);
+    process_input(&mut state, ButtonInput::Down(press1.clone()), &mut |e| events.push(e));
+    process_input(&mut state, ButtonInput::Up {
+        key: press1.token.key.clone(),
+        released_at: Instant::now(),
+    }, &mut |e| events.push(e));
+
+    // At this point, 1st click is released and waiting for 2nd click (no trigger yet)
+    assert!(!events.iter().any(|e| matches!(e, ButtonRuntimeEvent::Triggered { .. })));
+
+    // 2nd press down & up
+    let press2 = hook_press_bound(2, &binding);
+    process_input(&mut state, ButtonInput::Down(press2.clone()), &mut |e| events.push(e));
+    process_input(&mut state, ButtonInput::Up {
+        key: press2.token.key.clone(),
+        released_at: Instant::now(),
+    }, &mut |e| events.push(e));
+
+    // Now double-click should have triggered Action::SmartZoom!
+    let triggered: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            ButtonRuntimeEvent::Triggered { action, .. } => Some(action.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(triggered, vec![Action::SmartZoom]);
+}
+
+#[test]
+fn single_click_fires_after_double_click_timeout() {
+    let binding = Binding::MultiClick(MultiClickBinding::new(
+        Action::Copy,
+        Action::SmartZoom,
+    ));
+    let mut state = ButtonState::default();
+    let mut events = Vec::new();
+
+    // 1st press down & up
+    let press1 = hook_press_bound(1, &binding);
+    process_input(&mut state, ButtonInput::Down(press1.clone()), &mut |e| events.push(e));
+    process_input(&mut state, ButtonInput::Up {
+        key: press1.token.key.clone(),
+        released_at: Instant::now(),
+    }, &mut |e| events.push(e));
+
+    // Advance time past DOUBLE_CLICK_TIMEOUT
+    let past = Instant::now() + Duration::from_millis(350);
+    let due = state.due_long_presses(past);
+    assert_eq!(due.len(), 1);
+
+    emit_selected_long_presses(&mut state, &due, past, &mut |e| events.push(e));
+
+    // Single click (Copy) should have fired on timeout!
+    let triggered: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            ButtonRuntimeEvent::Triggered { action, .. } => Some(action.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(triggered, vec![Action::Copy]);
+}
+
+#[test]
+fn multi_click_hold_fires_on_threshold() {
+    let binding = Binding::MultiClick(MultiClickBinding::with_hold(
+        Action::Copy,
+        Action::SmartZoom,
+        Action::MissionControl,
+    ));
+    let mut state = ButtonState::default();
+    let mut events = Vec::new();
+
+    let press = hook_press_bound(1, &binding);
+    process_input(&mut state, ButtonInput::Down(press.clone()), &mut |e| events.push(e));
+
+    // Advance past LONG_PRESS_THRESHOLD (500ms)
+    let past = Instant::now() + Duration::from_millis(550);
+    let due = state.due_long_presses(past);
+    assert_eq!(due.len(), 1);
+
+    emit_selected_long_presses(&mut state, &due, past, &mut |e| events.push(e));
+
+    // Hold action (MissionControl) should have fired!
+    let triggered: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            ButtonRuntimeEvent::Triggered { action, .. } => Some(action.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(triggered, vec![Action::MissionControl]);
+}

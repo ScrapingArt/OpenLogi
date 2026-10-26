@@ -343,7 +343,10 @@ fn handle_button(
 /// was not armed over HID++ (no raw-wheel diversion), so it degrades to its
 /// click, which stays native when that is the button's own action.
 fn binding_is_native_click(id: ButtonId, binding: &Binding) -> bool {
-    !matches!(binding, Binding::LongPress(_)) && is_native_click(id, &binding.click_action())
+    !matches!(
+        binding,
+        Binding::LongPress(_) | Binding::MultiClick(_) | Binding::WheelHold(_)
+    ) && is_native_click(id, &binding.click_action())
 }
 
 /// Press of a remapped single-action button: suppress when the action was
@@ -576,6 +579,52 @@ pub fn start(
                         let Some(delta) = filtered else {
                             return EventDisposition::Suppress;
                         };
+
+                        let held_wheel = hooks.try_read().ok().and_then(|maps| {
+                            let hold_btn =
+                                HOLD.with_borrow(|h| h.current.as_ref().map(|c| c.button));
+                            if let Some(btn) = hold_btn
+                                && let Some(Binding::WheelHold(wh)) = maps.bindings.get(&btn)
+                            {
+                                return Some((btn, wh.wheel()));
+                            }
+                            SUPPRESSED_PRESSES.with_borrow(|s| {
+                                for btn in s.iter() {
+                                    if let Some(Binding::WheelHold(wh)) = maps.bindings.get(btn) {
+                                        return Some((*btn, wh.wheel()));
+                                    }
+                                }
+                                None
+                            })
+                        });
+
+                        if let Some((btn, wheel_mode)) = held_wheel {
+                            HOLD.with_borrow_mut(|h| {
+                                if let Some(held) = &h.current
+                                    && held.button == btn
+                                {
+                                    dispatcher.try_wheel_while_pressed(&held.press);
+                                    let _ = h.swipe.accumulate(100, 100);
+                                }
+                            });
+                            match wheel_mode {
+                                openlogi_core::binding::HeldWheel::Zoom => {
+                                    let zoom_delta = delta.y() * 0.05;
+                                    openlogi_inject::post_magnification(zoom_delta);
+                                    return EventDisposition::Suppress;
+                                }
+                                openlogi_core::binding::HeldWheel::HorizontalScroll => {
+                                    let h_delta = openlogi_core::scroll::ScrollDelta::pixels(
+                                        delta.y(),
+                                        0.0,
+                                    );
+                                    return queued_event_disposition(
+                                        scroll.try_hook_scroll(h_delta),
+                                    );
+                                }
+                            }
+                        }
+
                         return queued_event_disposition(scroll.try_hook_scroll(delta));
                     }
                     EventDisposition::PassThrough

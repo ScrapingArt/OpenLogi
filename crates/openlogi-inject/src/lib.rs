@@ -6,7 +6,7 @@ pub mod uinput;
 
 pub use inject::{
     DesktopSwitch, HeldChord, LiveDragPhase, SYNTHETIC_EVENT_USER_DATA, SmoothScrollPhase, ax_navigate_browser,
-    execute, natural_scrolling, post_phased_scroll, post_scroll, post_smooth_scroll, press_hold,
+    execute, natural_scrolling, post_magnification, post_phased_scroll, post_scroll, post_smooth_scroll, press_hold,
     set_desktop_switch,
 };
 

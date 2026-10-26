@@ -266,16 +266,93 @@ pub(super) fn process_input(
 ) {
     match input {
         ButtonInput::Down(press) => {
-            if let Some(stale) = state.press(press.clone()) {
+            let (new_press, stale) =
+                if let Some(existing) = state.take_awaiting_multi_click(&press.token.key) {
+                    let next_count = existing.multi_click_count().saturating_add(1);
+                    let binding = existing.multi_click_binding().unwrap().clone();
+                    let hold_deadline = binding
+                        .hold()
+                        .map(|_| Instant::now() + openlogi_core::binding::LONG_PRESS_THRESHOLD);
+                    let behavior = PressBehavior::MultiClickPending {
+                        binding,
+                        count: next_count,
+                        hold_deadline,
+                    };
+                    let updated = ActivePress {
+                        token: press.token.clone(),
+                        behavior,
+                        target: press.target.clone(),
+                    };
+                    (updated, None)
+                } else {
+                    let stale = state.press(press.clone());
+                    (press.clone(), stale)
+                };
+            if let Some(stale) = stale {
                 emit(ButtonRuntimeEvent::Ended {
                     press: stale,
                     reason: EndReason::Canceled(CancelReason::RepeatedDown),
                 });
             }
-            emit(ButtonRuntimeEvent::Started(press));
+            state.press(new_press.clone());
+            emit(ButtonRuntimeEvent::Started(new_press));
         }
         ButtonInput::Up { key, released_at } => {
             if let Some(mut press) = state.release(&key) {
+                if let PressBehavior::MultiClickPending { binding, count, .. } = &press.behavior {
+                    let count = *count;
+                    let binding = binding.clone();
+                    if count == 1 {
+                        let awaiting = ActivePress {
+                            token: press.token.clone(),
+                            behavior: PressBehavior::MultiClickAwaiting {
+                                binding,
+                                count: 1,
+                                deadline: released_at
+                                    + openlogi_core::binding::DOUBLE_CLICK_TIMEOUT,
+                            },
+                            target: press.target.clone(),
+                        };
+                        state.press(awaiting);
+                        return;
+                    } else if count == 2 {
+                        if binding.triple().is_some() {
+                            let awaiting = ActivePress {
+                                token: press.token.clone(),
+                                behavior: PressBehavior::MultiClickAwaiting {
+                                    binding,
+                                    count: 2,
+                                    deadline: released_at
+                                        + openlogi_core::binding::DOUBLE_CLICK_TIMEOUT,
+                                },
+                                target: press.target.clone(),
+                            };
+                            state.press(awaiting);
+                            return;
+                        }
+                        emit(ButtonRuntimeEvent::Triggered {
+                            press: press.clone(),
+                            action: binding.double().clone(),
+                        });
+                        emit(ButtonRuntimeEvent::Ended {
+                            press,
+                            reason: EndReason::Released,
+                        });
+                        return;
+                    } else {
+                        let action = binding.triple().unwrap_or(binding.double()).clone();
+                        emit(ButtonRuntimeEvent::Triggered {
+                            press: press.clone(),
+                            action,
+                        });
+                        emit(ButtonRuntimeEvent::Ended {
+                            press,
+                            reason: EndReason::Released,
+                        });
+                        return;
+                    }
+                }
+
                 if let Some(action) = press.fire_long(released_at) {
                     emit(ButtonRuntimeEvent::Triggered {
                         press: press.clone(),
@@ -312,8 +389,17 @@ pub(super) fn emit_selected_long_presses(
     now: Instant,
     emit: &mut impl FnMut(ButtonRuntimeEvent),
 ) {
-    for (press, action) in state.fire_selected_long_presses(tokens, now) {
-        emit(ButtonRuntimeEvent::Triggered { press, action });
+    for (press, action, was_awaiting) in state.fire_selected_long_presses(tokens, now) {
+        emit(ButtonRuntimeEvent::Triggered {
+            press: press.clone(),
+            action,
+        });
+        if was_awaiting {
+            emit(ButtonRuntimeEvent::Ended {
+                press,
+                reason: EndReason::Released,
+            });
+        }
     }
 }
 

@@ -13,6 +13,89 @@ use super::gesture::GestureDirection;
 /// action fires.
 pub const LONG_PRESS_THRESHOLD: Duration = Duration::from_millis(500);
 
+/// Double-click interval within which a second click triggers a double-click action.
+pub const DOUBLE_CLICK_TIMEOUT: Duration = Duration::from_millis(300);
+
+/// Multi-click binding for mouse buttons (click, double-click, optional triple-click, optional hold).
+///
+/// Disambiguated by requiring the lowercase `double` field (with optional `triple`
+/// and `hold`), while single-click uses `click` (or `single`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MultiClickBinding {
+    #[serde(alias = "single")]
+    click: Action,
+    double: Action,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    triple: Option<Action>,
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "long")]
+    hold: Option<Action>,
+}
+
+impl MultiClickBinding {
+    /// Create a double-click binding pairing a single-click action and a double-click action.
+    #[must_use]
+    pub const fn new(click: Action, double: Action) -> Self {
+        Self {
+            click,
+            double,
+            triple: None,
+            hold: None,
+        }
+    }
+
+    /// Create a multi-click binding with single-click, double-click, and hold.
+    #[must_use]
+    pub const fn with_hold(click: Action, double: Action, hold: Action) -> Self {
+        Self {
+            click,
+            double,
+            triple: None,
+            hold: Some(hold),
+        }
+    }
+
+    /// Create a full multi-click binding with single, double, triple, and hold.
+    #[must_use]
+    pub const fn with_triple_and_hold(
+        click: Action,
+        double: Action,
+        triple: Option<Action>,
+        hold: Option<Action>,
+    ) -> Self {
+        Self {
+            click,
+            double,
+            triple,
+            hold,
+        }
+    }
+
+    /// Single click action.
+    #[must_use]
+    pub const fn click(&self) -> &Action {
+        &self.click
+    }
+
+    /// Double click action.
+    #[must_use]
+    pub const fn double(&self) -> &Action {
+        &self.double
+    }
+
+    /// Optional triple click action.
+    #[must_use]
+    pub const fn triple(&self) -> Option<&Action> {
+        self.triple.as_ref()
+    }
+
+    /// Optional click-and-hold (long press) action.
+    #[must_use]
+    pub const fn hold(&self) -> Option<&Action> {
+        self.hold.as_ref()
+    }
+}
+
 /// The mutually exclusive actions of a threshold-based button binding.
 ///
 /// `short` fires only on an ordinary release before the threshold. `long`
@@ -53,6 +136,8 @@ pub enum HeldWheel {
     /// Scroll horizontally, as a thumb wheel does by default: turning the
     /// wheel away from the user scrolls left, toward the user scrolls right.
     HorizontalScroll,
+    /// Pinch-to-zoom magnification (native Apple trackpad magnification).
+    Zoom,
 }
 
 /// A button that turns the main scroll wheel into a virtual thumb wheel while
@@ -77,6 +162,15 @@ impl WheelHoldBinding {
         Self {
             click,
             wheel: HeldWheel::HorizontalScroll,
+        }
+    }
+
+    /// Zoom (pinch-to-zoom magnification) while held, and run `click` on a plain click.
+    #[must_use]
+    pub const fn zoom(click: Action) -> Self {
+        Self {
+            click,
+            wheel: HeldWheel::Zoom,
         }
     }
 
@@ -128,17 +222,20 @@ pub enum Binding {
     Gesture(BTreeMap<GestureDirection, Action>),
     /// Independent release-before-threshold and threshold actions.
     LongPress(LongPressBinding),
-    /// The main wheel scrolls horizontally while the button is held; a click
+    /// The main wheel scrolls horizontally or zooms while the button is held; a click
     /// without wheel movement runs the click action.
     WheelHold(WheelHoldBinding),
+    /// Multi-click binding: single-click, double-click, optional triple-click, optional hold.
+    MultiClick(MultiClickBinding),
 }
 
 impl Binding {
     /// The plain-click action for this binding: the [`Single`](Binding::Single)
     /// action, the [`Gesture`](Binding::Gesture) map's
     /// [`Click`](GestureDirection::Click) entry, a
-    /// [`LongPress`](Binding::LongPress) binding's short action, or a
-    /// [`WheelHold`](Binding::WheelHold) binding's click action. Falls back to
+    /// [`LongPress`](Binding::LongPress) binding's short action, a
+    /// [`WheelHold`](Binding::WheelHold) binding's click action, or a
+    /// [`MultiClick`](Binding::MultiClick) binding's click action. Falls back to
     /// [`Action::None`] when a gesture binding has no explicit `Click`.
     ///
     /// Lets the click-dispatch path stay binding-shape-agnostic.
@@ -152,6 +249,22 @@ impl Binding {
                 .unwrap_or(Action::None),
             Binding::LongPress(binding) => binding.short().clone(),
             Binding::WheelHold(binding) => binding.click().clone(),
+            Binding::MultiClick(binding) => binding.click().clone(),
+        }
+    }
+
+    /// Whether this is a multi-click binding.
+    #[must_use]
+    pub fn is_multi_click(&self) -> bool {
+        matches!(self, Binding::MultiClick(_))
+    }
+
+    /// Access the [`MultiClickBinding`] payload if this is a multi-click binding.
+    #[must_use]
+    pub fn multi_click(&self) -> Option<&MultiClickBinding> {
+        match self {
+            Binding::MultiClick(b) => Some(b),
+            _ => None,
         }
     }
 
@@ -160,7 +273,10 @@ impl Binding {
     #[must_use]
     pub fn direction_action(&self, direction: GestureDirection) -> Option<&Action> {
         match self {
-            Binding::Single(_) | Binding::LongPress(_) | Binding::WheelHold(_) => None,
+            Binding::Single(_)
+            | Binding::LongPress(_)
+            | Binding::WheelHold(_)
+            | Binding::MultiClick(_) => None,
             Binding::Gesture(map) => map.get(&direction),
         }
     }
@@ -191,6 +307,7 @@ impl Binding {
             Binding::Single(action) => action.clone(),
             Binding::LongPress(binding) => binding.short().clone(),
             Binding::WheelHold(binding) => binding.click().clone(),
+            Binding::MultiClick(binding) => binding.click().clone(),
             Binding::Gesture(_) => return,
         };
         *self = Binding::Gesture(BTreeMap::from([(GestureDirection::Click, click)]));

@@ -246,8 +246,21 @@ impl AppState {
                     Some(Binding::LongPress(binding)) => {
                         Binding::LongPress(LongPressBinding::new(action, binding.long().clone()))
                     }
-                    Some(Binding::WheelHold(_)) => {
-                        Binding::WheelHold(WheelHoldBinding::horizontal_scroll(action))
+                    Some(Binding::WheelHold(binding)) => match binding.wheel() {
+                        openlogi_core::binding::HeldWheel::HorizontalScroll => {
+                            Binding::WheelHold(WheelHoldBinding::horizontal_scroll(action))
+                        }
+                        openlogi_core::binding::HeldWheel::Zoom => {
+                            Binding::WheelHold(WheelHoldBinding::zoom(action))
+                        }
+                    },
+                    Some(Binding::MultiClick(binding)) => {
+                        Binding::MultiClick(openlogi_core::binding::MultiClickBinding::with_triple_and_hold(
+                            action,
+                            binding.double().clone(),
+                            binding.triple().cloned(),
+                            binding.hold().cloned(),
+                        ))
                     }
                     _ => Binding::Single(action),
                 };

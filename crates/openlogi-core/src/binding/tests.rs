@@ -279,13 +279,51 @@ fn binding_wheel_hold_requires_exact_click_and_wheel_fields() {
     let missing_wheel = "[bindings.Back]\nclick = \"Copy\"";
     toml::from_str::<BindingWrapper>(missing_wheel).expect_err("a wheel hold needs its wheel");
 
-    let unknown_wheel = "[bindings.Back]\nclick = \"Copy\"\nwheel = \"Zoom\"";
+    let unknown_wheel = "[bindings.Back]\nclick = \"Copy\"\nwheel = \"Bogus\"";
     toml::from_str::<BindingWrapper>(unknown_wheel)
         .expect_err("a wheel hold rejects a wheel behavior it does not know");
 
     let unknown =
         "[bindings.Back]\nclick = \"Copy\"\nwheel = \"HorizontalScroll\"\nlong = \"Paste\"";
     toml::from_str::<BindingWrapper>(unknown).expect_err("a wheel hold rejects unknown fields");
+
+    // Zoom is a supported wheel behavior
+    let zoom = "[bindings.Back]\nclick = \"Copy\"\nwheel = \"Zoom\"";
+    let parsed = toml::from_str::<BindingWrapper>(zoom).expect("Zoom is valid");
+    assert_eq!(
+        parsed.bindings[&ButtonId::Back],
+        Binding::WheelHold(WheelHoldBinding::zoom(Action::Copy))
+    );
+}
+
+#[test]
+fn binding_multi_click_roundtrips_without_overlapping_other_table_shapes() {
+    let binding = Binding::MultiClick(MultiClickBinding::with_hold(
+        Action::MouseBack,
+        Action::SmartZoom,
+        Action::MissionControl,
+    ));
+    let back = binding_roundtrip(BTreeMap::from([(ButtonId::Back, binding.clone())]));
+    assert_eq!(back[&ButtonId::Back], binding);
+
+    let toml = toml::to_string_pretty(&BindingWrapper { bindings: back }).expect("serialize");
+    assert!(toml.contains("click = \"MouseBack\""));
+    assert!(toml.contains("double = \"SmartZoom\""));
+    assert!(toml.contains("hold = \"MissionControl\""));
+    assert!(!toml.contains("MultiClick"));
+}
+
+#[test]
+fn binding_multi_click_requires_double() {
+    let missing_double = "[bindings.Back]\nclick = \"Copy\"";
+    toml::from_str::<BindingWrapper>(missing_double).expect_err("multi-click needs double");
+
+    let with_single_alias = "[bindings.Back]\nsingle = \"Copy\"\ndouble = \"Paste\"";
+    let parsed = toml::from_str::<BindingWrapper>(with_single_alias).expect("single alias works");
+    assert_eq!(
+        parsed.bindings[&ButtonId::Back],
+        Binding::MultiClick(MultiClickBinding::new(Action::Copy, Action::Paste))
+    );
 }
 
 #[test]

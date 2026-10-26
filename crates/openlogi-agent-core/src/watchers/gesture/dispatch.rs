@@ -278,6 +278,10 @@ impl InputDispatcher {
                 session,
                 held_wheel_scroll(delta, per_notch, plan.invert_wheel),
             ),
+            HeldWheel::Zoom => {
+                let zoom_delta = f64::from(delta) / f64::from(per_notch.get()) * 0.05;
+                openlogi_inject::post_magnification(zoom_delta);
+            }
         }
     }
 

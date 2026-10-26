@@ -26,6 +26,8 @@ use keyboard_layout::ForegroundLayout;
 const WHEEL_DELTA: i32 = 120;
 const WHEEL_DELTA_F64: f64 = 120.0;
 
+pub fn post_magnification(_delta: f64) {}
+
 static SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
     LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
 

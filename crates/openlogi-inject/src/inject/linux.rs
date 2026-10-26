@@ -27,6 +27,8 @@ use super::{HeldKey, KeyPhase, QuantizedScroll, ScrollQuantizer};
 
 const HIGH_RES_UNITS_PER_TICK: f64 = 120.0;
 
+pub fn post_magnification(_delta: f64) {}
+
 #[derive(Default)]
 struct ScrollOutput {
     high_resolution: ScrollQuantizer,

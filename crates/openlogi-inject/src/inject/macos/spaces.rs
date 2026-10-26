@@ -83,6 +83,28 @@ pub(super) fn smart_zoom() {
     CGEvent::post(CGEventTapLocation::SessionEventTap, Some(&event));
 }
 
+/// Post an Apple Trackpad Magnification (pinch-to-zoom) event.
+///
+/// WindowServer recognises this as a native two-finger pinch gesture,
+/// smoothly zooming in/out in Safari, Maps, Figma, Preview, etc.
+pub fn post_magnification(delta: f64) {
+    let Some(event) = CGEvent::new(None) else {
+        tracing::warn!("CGEvent::new failed for magnification");
+        return;
+    };
+    CGEvent::set_type(Some(&event), CGEventType(29));
+    CGEvent::set_integer_value_field(Some(&event), CGEventField(55), 29);
+    CGEvent::set_integer_value_field(Some(&event), CGEventField(110), 8);
+    CGEvent::set_integer_value_field(Some(&event), CGEventField(132), 2);
+    CGEvent::set_double_value_field(Some(&event), CGEventField(113), delta);
+    CGEvent::set_integer_value_field(
+        Some(&event),
+        CGEventField::EventSourceUserData,
+        super::super::SYNTHETIC_EVENT_USER_DATA,
+    );
+    CGEvent::post(CGEventTapLocation::SessionEventTap, Some(&event));
+}
+
 /// Post one real-time frame of a live user-dragged Space switch.
 ///
 /// Progress is normalized signed travel (-1.0 to 1.0).

@@ -139,13 +139,18 @@ impl ButtonId {
     }
 
     /// Whether holding this button may turn the main wheel into a virtual
-    /// thumb wheel ([`Binding::WheelHold`](super::Binding::WheelHold)). Back
-    /// and Forward are the only eligible controls: they are where devices
-    /// report raw-wheel support (`0x1b04` `RAW_WHEEL`), and where Logi
-    /// Options+ offers its virtual thumb wheel.
+    /// thumb wheel or pinch-to-zoom ([`Binding::WheelHold`](super::Binding::WheelHold)).
+    /// Back, Forward, Middle Click, DPI Toggle, and Gesture Button are supported.
     #[must_use]
     pub fn supports_wheel_hold(self) -> bool {
-        matches!(self, ButtonId::Back | ButtonId::Forward)
+        matches!(
+            self,
+            ButtonId::MiddleClick
+                | ButtonId::Back
+                | ButtonId::Forward
+                | ButtonId::DpiToggle
+                | ButtonId::GestureButton
+        )
     }
 
     /// Whether this button is a HID++ gesture source — a control that is
