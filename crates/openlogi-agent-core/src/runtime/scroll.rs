@@ -7,8 +7,12 @@
 //! input never enters this runtime, so native trackpad and continuous wheel
 //! streams cannot be mixed with wheel ticks.
 
+mod debounce;
 mod worker;
 
+pub use debounce::{
+    WheelDebouncer, WheelDisturbanceFilter, WheelFluidity, WheelHysteresis,
+};
 pub use worker::{ScrollInputHandle, ScrollPreferences, ScrollRuntime};
 
 use std::collections::HashMap;
@@ -33,40 +37,40 @@ const FRAME_PERIOD: Duration = Duration::from_millis(8);
 const PHASED_IDLE: Duration = Duration::from_millis(120);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct WheelDelta {
-    x: f64,
-    y: f64,
+pub(crate) struct WheelDelta {
+    pub(crate) x: f64,
+    pub(crate) y: f64,
 }
 
 impl WheelDelta {
-    const ZERO: Self = Self { x: 0.0, y: 0.0 };
+    pub(crate) const ZERO: Self = Self { x: 0.0, y: 0.0 };
 
-    fn is_zero(self) -> bool {
+    pub(crate) fn is_zero(self) -> bool {
         self.x == 0.0 && self.y == 0.0
     }
 
-    fn plus(self, other: Self) -> Self {
+    pub(crate) fn plus(self, other: Self) -> Self {
         Self {
             x: self.x + other.x,
             y: self.y + other.y,
         }
     }
 
-    fn minus(self, other: Self) -> Self {
+    pub(crate) fn minus(self, other: Self) -> Self {
         Self {
             x: self.x - other.x,
             y: self.y - other.y,
         }
     }
 
-    fn scale(self, factor: f64) -> Self {
+    pub(crate) fn scale(self, factor: f64) -> Self {
         Self {
             x: self.x * factor,
             y: self.y * factor,
         }
     }
 
-    fn with_vertical_scale(self, factor: f64) -> Option<Self> {
+    pub(crate) fn with_vertical_scale(self, factor: f64) -> Option<Self> {
         let y = self.y * factor;
         y.is_finite().then_some(Self { x: self.x, y })
     }
@@ -147,18 +151,19 @@ struct MotionSegment {
     from: WheelDelta,
     target: WheelDelta,
     started_at: Instant,
+    duration: Duration,
 }
 
 impl MotionSegment {
     fn position_at(&self, at: Instant) -> WheelDelta {
         let elapsed = at.saturating_duration_since(self.started_at);
-        let progress = (elapsed.as_secs_f64() / ANIMATION_DURATION.as_secs_f64()).clamp(0.0, 1.0);
+        let progress = (elapsed.as_secs_f64() / self.duration.as_secs_f64()).clamp(0.0, 1.0);
         let eased = progress * progress * (3.0 - 2.0 * progress);
         self.from.plus(self.target.minus(self.from).scale(eased))
     }
 
     fn ends_at(&self) -> Instant {
-        self.started_at + ANIMATION_DURATION
+        self.started_at + self.duration
     }
 
     fn is_complete_at(&self, at: Instant) -> bool {
@@ -175,12 +180,13 @@ struct ActiveMotion {
 }
 
 impl ActiveMotion {
-    fn new(impulse: WheelDelta, at: Instant) -> Self {
+    fn new(impulse: WheelDelta, at: Instant, duration: Duration) -> Self {
         Self {
             segment: MotionSegment {
                 from: WheelDelta::ZERO,
                 target: impulse,
                 started_at: at,
+                duration,
             },
             emitted: WheelDelta::ZERO,
             next_frame: at + FRAME_PERIOD,
@@ -189,7 +195,7 @@ impl ActiveMotion {
 
     /// Evaluate the old segment at the impulse timestamp, then restart toward
     /// the cumulative target.
-    fn retarget(&mut self, impulse: WheelDelta, at: Instant) -> MotionUpdate {
+    fn retarget(&mut self, impulse: WheelDelta, at: Instant, duration: Duration) -> MotionUpdate {
         let position = self.segment.position_at(at);
         let target = self.segment.target.plus(impulse);
         let delta = self.delta_to(position);
@@ -201,6 +207,7 @@ impl ActiveMotion {
             from: position,
             target,
             started_at: at,
+            duration,
         };
         self.next_frame = at + FRAME_PERIOD;
         MotionUpdate::Active(delta)
@@ -315,6 +322,7 @@ struct ScrollEngine {
     /// idle window closes. Disjoint from `active`: smoothing on or off decides
     /// which map a source can enter, and a preference change cancels both.
     phased: HashMap<ScrollSource, Instant>,
+    fluidity: HashMap<ScrollSource, WheelFluidity>,
     output: OutputStream,
 }
 
@@ -326,6 +334,12 @@ impl ScrollEngine {
         at: Instant,
         emit: &mut impl FnMut(ScrollFrame),
     ) {
+        let duration = self
+            .fluidity
+            .entry(source.clone())
+            .or_default()
+            .adapt(impulse, at);
+
         if self
             .active
             .get(&source)
@@ -338,14 +352,14 @@ impl ScrollEngine {
 
         let update = match self.active.entry(source) {
             Entry::Occupied(mut entry) => {
-                let update = entry.get_mut().retarget(impulse, at);
+                let update = entry.get_mut().retarget(impulse, at, duration);
                 if update.is_finished() {
                     entry.remove();
                 }
                 Some(update)
             }
             Entry::Vacant(entry) => {
-                entry.insert(ActiveMotion::new(impulse, at));
+                entry.insert(ActiveMotion::new(impulse, at, duration));
                 None
             }
         };
@@ -386,6 +400,9 @@ impl ScrollEngine {
             };
             if update.is_finished() {
                 self.active.remove(&source);
+                if let Some(fluidity) = self.fluidity.get_mut(&source) {
+                    fluidity.reset();
+                }
             }
             self.emit_update(update, emit);
         }
@@ -410,6 +427,7 @@ impl ScrollEngine {
     }
 
     fn cancel_source(&mut self, source: &ScrollSource, emit: &mut impl FnMut(ScrollFrame)) {
+        self.fluidity.remove(source);
         // Both removals must run, so neither may short-circuit the other.
         let was_smooth = self.active.remove(source).is_some();
         let was_phased = self.phased.remove(source).is_some();
@@ -419,6 +437,7 @@ impl ScrollEngine {
     }
 
     fn cancel_all(&mut self, emit: &mut impl FnMut(ScrollFrame)) {
+        self.fluidity.clear();
         self.active.clear();
         self.phased.clear();
         self.output.cancel(emit);

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
@@ -12,7 +12,10 @@ use openlogi_core::config::VerticalScrollSensitivity;
 use openlogi_core::scroll::ScrollDelta;
 use tracing::warn;
 
-use super::{ScrollEngine, ScrollFrame, ScrollSource, WheelDelta};
+use super::{
+    ScrollEngine, ScrollFrame, ScrollSource, WheelDelta, WheelDisturbanceFilter,
+    WheelHysteresis,
+};
 use crate::runtime::HidppSessionId;
 
 /// OS-hook callbacks must fail open rather than wait for the worker.
@@ -228,9 +231,18 @@ pub struct ScrollInputHandle {
     generation: Arc<AtomicU64>,
     accepting: Arc<AtomicBool>,
     preferences: Arc<ScrollPreferences>,
+    disturbance: Arc<Mutex<WheelDisturbanceFilter>>,
+    session_debouncers: Arc<Mutex<HashMap<String, WheelHysteresis>>>,
 }
 
 impl ScrollInputHandle {
+    /// Notify middle mouse button state to filter accidental wheel micro-ticks during clicks.
+    pub fn on_middle_button(&self, pressed: bool) {
+        if let Ok(mut disturbance) = self.disturbance.lock() {
+            disturbance.on_middle_button(pressed, Instant::now());
+        }
+    }
+
     /// Queue one ordinary wheel impulse from the current OS-hook thread.
     ///
     /// Pixel input, zero/non-finite distance, a full queue, or an unavailable
@@ -245,14 +257,16 @@ impl ScrollInputHandle {
         let Ok(impulse) = WheelDelta::try_from(delta) else {
             return false;
         };
+
         let preferences = self.preferences.load();
         let Some(scaled) =
             impulse.with_vertical_scale(preferences.vertical_sensitivity.scroll_multiplier())
         else {
             return false;
         };
+        let now = Instant::now();
         let output = if preferences.smooth_scroll {
-            ScrollOutputMode::Smooth { at: Instant::now() }
+            ScrollOutputMode::Smooth { at: now }
         } else if scaled != impulse {
             ScrollOutputMode::Direct
         } else {
@@ -309,6 +323,30 @@ impl ScrollInputHandle {
         let Ok(impulse) = WheelDelta::try_from(delta) else {
             return Err(delta);
         };
+
+        let now = Instant::now();
+        if let Ok(disturbance) = self.disturbance.lock()
+            && disturbance.is_disturbed(now)
+        {
+            return Ok(());
+        }
+
+        let impulse = if let Ok(mut debouncers) = self.session_debouncers.lock() {
+            let key = session.device_key();
+            let hysteresis = if let Some(existing) = debouncers.get_mut(key) {
+                existing
+            } else {
+                debouncers.entry(key.to_owned()).or_default()
+            };
+            hysteresis.filter(impulse, now)
+        } else {
+            impulse
+        };
+
+        if impulse.is_zero() {
+            return Ok(());
+        }
+
         let multiplier = self.preferences.vertical_sensitivity().scroll_multiplier();
         let Some(scaled) = impulse.with_vertical_scale(multiplier) else {
             return Err(delta);
@@ -317,7 +355,7 @@ impl ScrollInputHandle {
             && self.try_enqueue(
                 ScrollSource::Hidpp(session.clone()),
                 scaled,
-                ScrollOutputMode::Eased { at: Instant::now() },
+                ScrollOutputMode::Eased { at: now },
             );
         if queued { Ok(()) } else { Err(scaled.into()) }
     }
@@ -354,6 +392,9 @@ impl ScrollInputHandle {
 
     /// Cancel output belonging to one HID++ capture-session incarnation.
     pub(crate) fn cancel_hidpp_session(&self, session: &HidppSessionId) {
+        if let Ok(mut debouncers) = self.session_debouncers.lock() {
+            debouncers.remove(session.device_key());
+        }
         let generation = self.generation.load(Ordering::Acquire);
         let source = ScrollSource::Hidpp(session.clone());
         match self
@@ -377,6 +418,12 @@ impl ScrollInputHandle {
     }
 
     fn cancel_all(&self) {
+        if let Ok(mut disturbance) = self.disturbance.lock() {
+            *disturbance = WheelDisturbanceFilter::default();
+        }
+        if let Ok(mut debouncers) = self.session_debouncers.lock() {
+            debouncers.clear();
+        }
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.wake();
     }
@@ -418,6 +465,8 @@ impl ScrollRuntime {
             generation: Arc::clone(&generation),
             accepting: Arc::new(AtomicBool::new(true)),
             preferences: Arc::clone(&preferences),
+            disturbance: Arc::new(Mutex::new(WheelDisturbanceFilter::default())),
+            session_debouncers: Arc::new(Mutex::new(HashMap::new())),
         };
         let worker = thread::Builder::new()
             .name("openlogi-scroll".into())
@@ -619,6 +668,8 @@ mod tests {
                 generation: Arc::new(AtomicU64::new(0)),
                 accepting: Arc::new(AtomicBool::new(true)),
                 preferences,
+                disturbance: Arc::new(Mutex::new(WheelDisturbanceFilter::default())),
+                session_debouncers: Arc::new(Mutex::new(HashMap::new())),
             },
             receiver,
             control_rx,
@@ -1442,5 +1493,74 @@ mod tests {
             assert_eq!(phase, openlogi_inject::SmoothScrollPhase::Changed);
         }
         runtime.shutdown();
+    }
+
+    #[test]
+    fn hidpp_session_debouncer_absorbs_rebound() {
+        let (input, receiver, _controls) = standalone_input(10, preferences(true, 14));
+        let session = HidppSessionId::with_epoch("mouse-a", 1);
+
+        // Initial scroll down
+        assert_eq!(
+            input.try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, 1.0)),
+            Ok(())
+        );
+        let first = queued_input(&receiver);
+        assert!(first.impulse.y > 0.0);
+
+        // Rebound tick is absorbed
+        assert_eq!(
+            input.try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, -0.5)),
+            Ok(())
+        );
+        assert!(receiver.try_recv().is_err());
+
+        // Subsequent intentional scroll down continues
+        assert_eq!(
+            input.try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, 1.0)),
+            Ok(())
+        );
+        let second = queued_input(&receiver);
+        assert!(second.impulse.y > 0.0);
+    }
+
+    #[test]
+    fn device_isolation_ensures_mouse_a_does_not_affect_mouse_b() {
+        let (input, receiver, _controls) = standalone_input(10, preferences(true, 14));
+        let session_a = HidppSessionId::with_epoch("mouse-a", 1);
+        let session_b = HidppSessionId::with_epoch("mouse-b", 1);
+
+        // Mouse A scrolls down
+        assert_eq!(
+            input.try_hidpp_wheel_scroll(&session_a, ScrollDelta::wheel_ticks(0.0, 1.0)),
+            Ok(())
+        );
+        let first = queued_input(&receiver);
+        assert!(first.impulse.y > 0.0);
+
+        // Mouse B scrolls in opposite direction (-0.5). Because it is a separate device,
+        // it must NOT be absorbed by Mouse A's rebound accumulator!
+        assert_eq!(
+            input.try_hidpp_wheel_scroll(&session_b, ScrollDelta::wheel_ticks(0.0, -0.5)),
+            Ok(())
+        );
+        let second = queued_input(&receiver);
+        assert!(second.impulse.y < 0.0);
+    }
+
+    #[test]
+    fn hidpp_session_middle_click_disturbance_suppresses_scroll() {
+        let (input, receiver, _controls) = standalone_input(10, preferences(true, 14));
+        let session = HidppSessionId::with_epoch("mouse-a", 1);
+
+        // Press middle button BEFORE any scroll has ever occurred on this session
+        input.on_middle_button(true);
+
+        // Accidental scroll during middle click must be suppressed immediately
+        assert_eq!(
+            input.try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, 1.0)),
+            Ok(())
+        );
+        assert!(receiver.try_recv().is_err());
     }
 }
