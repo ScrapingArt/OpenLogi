@@ -7,9 +7,11 @@
 //! input never enters this runtime, so native trackpad and continuous wheel
 //! streams cannot be mixed with wheel ticks.
 
+mod acceleration;
 mod debounce;
 mod worker;
 
+pub use acceleration::WheelAcceleration;
 pub use debounce::{
     WheelDebouncer, WheelDisturbanceFilter, WheelFluidity, WheelHysteresis,
 };

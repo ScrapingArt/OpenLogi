@@ -547,6 +547,27 @@ fn receive_command(
     )
 }
 
+fn accelerate_impulse(
+    accelerations: &mut HashMap<ScrollSource, super::WheelAcceleration>,
+    source: &ScrollSource,
+    impulse: WheelDelta,
+    at: Instant,
+    sensitivity: f64,
+) -> WheelDelta {
+    let y = if impulse.y == 0.0 {
+        0.0
+    } else {
+        let raw_y = if sensitivity.abs() > f64::EPSILON {
+            impulse.y / sensitivity
+        } else {
+            impulse.y
+        };
+        let accel = accelerations.entry(source.clone()).or_default();
+        accel.accelerate(raw_y, at, sensitivity)
+    };
+    WheelDelta { x: impulse.x, y }
+}
+
 fn run_worker(
     mut receive: impl FnMut(Option<Instant>) -> Result<ScrollCommand, mpsc::RecvTimeoutError>,
     controls: &mpsc::Receiver<ScrollControl>,
@@ -556,6 +577,7 @@ fn run_worker(
     emit_direct: &mut impl FnMut(WheelDelta),
 ) {
     let mut engine = ScrollEngine::default();
+    let mut accelerations = HashMap::<ScrollSource, super::WheelAcceleration>::new();
     let mut observed_smoothing = preferences.smooth_scroll_enabled();
     // An overflow-cancelled incarnation stays tombstoned so accepted input that
     // was already queued when control overtook the saturated queue is ignored.
@@ -573,13 +595,16 @@ fn run_worker(
                     if cancelled_generation > cancellations.generation
                         && cancellations.advance_to(shared_generation.load(Ordering::Acquire))
                     {
+                        accelerations.clear();
                         engine.cancel_all(emit_smooth);
                     }
                     if cancellations.cancel(&session, cancelled_generation) {
+                        accelerations.remove(&ScrollSource::Hidpp(session.clone()));
                         engine.cancel_source(&ScrollSource::Hidpp(session), emit_smooth);
                     }
                 }
                 ScrollControl::Shutdown(request) => {
+                    accelerations.clear();
                     engine.cancel_all(emit_smooth);
                     let _ = request.done.send(());
                     return;
@@ -600,8 +625,10 @@ fn run_worker(
             // old generation and is rejected below, so its source tombstone
             // can no longer protect anything. A delayed old-generation control
             // is also ignored above instead of recreating it.
+            accelerations.clear();
             engine.cancel_all(emit_smooth);
         } else if toggled {
+            accelerations.clear();
             engine.cancel_all(emit_smooth);
         }
 
@@ -609,18 +636,37 @@ fn run_worker(
             Ok(ScrollCommand::Input(input)) if cancellations.accepts(&input) => {
                 match input.output_under(smoothing) {
                     ScrollOutputMode::Smooth { at } | ScrollOutputMode::Eased { at } => {
-                        engine.impulse(input.source, input.impulse, at, emit_smooth);
+                        let is_main_wheel = matches!(
+                            (&input.source, input.output),
+                            (ScrollSource::OsHook(_), ScrollOutputMode::Smooth { .. })
+                                | (ScrollSource::Hidpp(_), ScrollOutputMode::Eased { .. })
+                        );
+                        let accelerated = if is_main_wheel {
+                            let sensitivity = preferences.vertical_sensitivity().scroll_multiplier();
+                            accelerate_impulse(
+                                &mut accelerations,
+                                &input.source,
+                                input.impulse,
+                                at,
+                                sensitivity,
+                            )
+                        } else {
+                            input.impulse
+                        };
+                        engine.impulse(input.source, accelerated, at, emit_smooth);
                     }
                     ScrollOutputMode::Phased { at } => {
                         engine.phased_impulse(input.source, input.impulse, at, emit_smooth);
                     }
                     ScrollOutputMode::Direct => {
+                        accelerations.remove(&input.source);
                         engine.cancel_source(&input.source, emit_smooth);
                         emit_direct(input.impulse);
                     }
                 }
             }
             Ok(ScrollCommand::CancelSource(source)) => {
+                accelerations.remove(&source);
                 engine.cancel_source(&source, emit_smooth);
             }
             Ok(ScrollCommand::Input(_) | ScrollCommand::Wake) => {}
@@ -1562,5 +1608,111 @@ mod tests {
             Ok(())
         );
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn worker_accelerate_impulse_preserves_slow_single_notch() {
+        let mut accels = HashMap::new();
+        let source = ScrollSource::current_hook();
+        let now = Instant::now();
+
+        // Single tick at sensitivity 1.0 (multiplier 1.0)
+        let impulse = WheelDelta { x: 0.0, y: 1.0 };
+        let out = accelerate_impulse(&mut accels, &source, impulse, now, 1.0);
+        assert_eq!(out, WheelDelta { x: 0.0, y: 1.0 });
+
+        // Sensitivity 2.0 scales queued impulse to y=2.0; accelerate_impulse normalizes back to raw 1.0
+        let mut accels2 = HashMap::new();
+        let impulse2 = WheelDelta { x: 0.0, y: 2.0 };
+        let out2 = accelerate_impulse(&mut accels2, &source, impulse2, now, 2.0);
+        assert_eq!(out2, WheelDelta { x: 0.0, y: 1.0 });
+    }
+
+    #[test]
+    fn worker_accelerate_impulse_ramps_up_on_rapid_ticks() {
+        let mut accels = HashMap::new();
+        let source = ScrollSource::current_hook();
+        let now = Instant::now();
+
+        let impulse = WheelDelta { x: 0.0, y: 1.0 };
+        let out1 = accelerate_impulse(&mut accels, &source, impulse, now, 1.0);
+        assert_eq!(out1.y, 1.0);
+
+        // Subsequent rapid tick 15ms later
+        let out2 = accelerate_impulse(
+            &mut accels,
+            &source,
+            impulse,
+            now + Duration::from_millis(15),
+            1.0,
+        );
+        assert!(out2.y > 1.0, "expected acceleration gain > 1.0, got {}", out2.y);
+
+        // Third rapid tick increases velocity further
+        let out3 = accelerate_impulse(
+            &mut accels,
+            &source,
+            impulse,
+            now + Duration::from_millis(30),
+            1.0,
+        );
+        assert!(out3.y > out2.y, "expected increasing acceleration gain, got {}", out3.y);
+    }
+
+    #[test]
+    fn worker_main_wheel_accelerates_while_thumb_wheel_passes_unaccelerated() {
+        let (input, commands, controls) = standalone_input(10, preferences(true, 14));
+        let generation = Arc::clone(&input.generation);
+        let preferences = Arc::clone(&input.preferences);
+
+        // Send two rapid main wheel ticks to retarget active motion and emit a frame
+        assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 1.0)));
+        assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 1.0)));
+        drop(input);
+
+        let mut frames = Vec::new();
+        let mut direct = Vec::new();
+        run_worker(
+            |deadline| receive_command(&commands, deadline),
+            &controls,
+            &generation,
+            &preferences,
+            &mut |frame| frames.push(frame),
+            &mut |delta| direct.push(delta),
+        );
+
+        assert!(!frames.is_empty(), "expected retargeted smooth frame from rapid ticks");
+        assert!(direct.is_empty());
+    }
+
+    #[test]
+    fn worker_cancellation_cleans_up_acceleration_state() {
+        let mut accels = HashMap::new();
+        let source = ScrollSource::current_hook();
+        let now = Instant::now();
+        let impulse = WheelDelta { x: 0.0, y: 1.0 };
+
+        accelerate_impulse(&mut accels, &source, impulse, now, 1.0);
+        let accelerated = accelerate_impulse(
+            &mut accels,
+            &source,
+            impulse,
+            now + Duration::from_millis(15),
+            1.0,
+        );
+        assert!(accelerated.y > 1.0);
+
+        // Clean up source on cancellation
+        accels.remove(&source);
+
+        // Next tick starts fresh after cleanup
+        let fresh = accelerate_impulse(
+            &mut accels,
+            &source,
+            impulse,
+            now + Duration::from_millis(20),
+            1.0,
+        );
+        assert_eq!(fresh.y, 1.0);
     }
 }
