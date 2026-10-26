@@ -42,9 +42,9 @@ ACTION_MAP = {
     "ASSIGNMENT_NAME_SMART_ZOOM": "SmartZoom",
     # Mouse clicks
     "ASSIGNMENT_NAME_MIDDLE_BUTTON": "MiddleClick",
-    "ASSIGNMENT_NAME_BACK": "Back",
-    "ASSIGNMENT_NAME_FORWARD": "Forward",
-    "ASSIGNMENT_NAME_MODE_SHIFT": "SmartShiftToggle",
+    "ASSIGNMENT_NAME_BACK": "MouseBack",
+    "ASSIGNMENT_NAME_FORWARD": "MouseForward",
+    "ASSIGNMENT_NAME_MODE_SHIFT": "ToggleSmartShift",
     "ASSIGNMENT_NAME_HORIZONTAL_SCROLL": "HorizontalScroll",
     # Media controls
     "ASSIGNMENT_NAME_PLAY_PAUSE": "PlayPause",
@@ -216,7 +216,7 @@ def generate_openlogi_toml(extracted_devices):
         if dev.get("smartshift"):
             sw = dev["smartshift"]
             lines.append(
-                f'smartshift = {{ auto_disengage = {sw["auto_disengage"]}, mode = "{sw["mode"]}" }}'
+                f'smartshift = {{ auto_disengage = {sw["auto_disengage"]}, mode = "{sw["mode"]}", tunable_torque = 0 }}'
             )
         if dev.get("smooth_wheel"):
             lines.append("smooth_wheel = true")
@@ -226,7 +226,7 @@ def generate_openlogi_toml(extracted_devices):
             lines.append(f'{btn} = "{act}"')
 
         if dev.get("gesture"):
-            lines.append(f'\n[devices."{toml_key}".bindings.GestureButton.gesture]')
+            lines.append(f'\n[devices."{toml_key}".bindings.GestureButton]')
             for direction in ["Click", "Up", "Down", "Left", "Right"]:
                 act = dev["gesture"].get(direction, "None")
                 lines.append(f'{direction} = "{act}"')
