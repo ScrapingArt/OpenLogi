@@ -77,6 +77,17 @@ pub(in crate::inject) fn post_phased_scroll(delta: ScrollDelta, phase: SmoothScr
     post_continuous_scroll(delta, Some(phase));
 }
 
+/// Normalize incoming scroll deltas to pixels for continuous injection.
+pub(crate) const fn normalize_continuous_delta(delta: ScrollDelta) -> ScrollDelta {
+    match delta {
+        ScrollDelta::Pixels { .. } => delta,
+        ScrollDelta::WheelTicks { x, y } => ScrollDelta::Pixels {
+            x: x * 10.0,
+            y: y * 10.0,
+        },
+    }
+}
+
 /// Post one continuous pixel event, phaseless (`None`) or stamped with a
 /// gesture phase.
 ///
@@ -88,15 +99,7 @@ pub(in crate::inject) fn post_phased_scroll(delta: ScrollDelta, phase: SmoothScr
 /// from JS wheel handlers). A phase is stamped only where a gesture is the
 /// point, such as a horizontal swipe AppKit's recognisers must see.
 fn post_continuous_scroll(delta: ScrollDelta, phase: Option<SmoothScrollPhase>) {
-    if let ScrollDelta::WheelTicks { x, y } = delta {
-        if phase.is_none() && x == 0.0 && y == 0.0 {
-            return;
-        }
-        if let Some(event) = wheel_scroll_event(x, y, wheel_ticks(x, y), phase) {
-            event.post(CGEventTapLocation::HID);
-        }
-        return;
-    }
+    let delta = normalize_continuous_delta(delta);
 
     let Ok(mut quantizer) = SMOOTH_SCROLL_QUANTIZER.lock() else {
         tracing::warn!("macOS smooth-scroll quantizer mutex poisoned");
@@ -339,5 +342,68 @@ mod tests {
             event.get_double_value_field(EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_2);
         assert!((y - 1.6).abs() < 1.0e-4, "{y}");
         assert!((x + 0.75).abs() < 1.0e-4, "{x}");
+    }
+
+    #[test]
+    fn continuous_scroll_event_sets_point_delta_and_continuity() {
+        let delta = QuantizedScroll { x: 5, y: -25 };
+        let event = continuous_scroll_event(delta, None).expect("continuous scroll event");
+        assert_eq!(
+            event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_IS_CONTINUOUS),
+            1
+        );
+        assert_eq!(
+            event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_1),
+            -25
+        );
+        assert_eq!(
+            event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_2),
+            5
+        );
+        assert_eq!(
+            event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1),
+            -2
+        );
+        assert_eq!(
+            event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_2),
+            0
+        );
+        // Fixed-point 16.16 scaling: points * 65536 / 10
+        assert_eq!(
+            event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1),
+            -163840
+        );
+        assert_eq!(
+            event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_2),
+            32768
+        );
+        let y_fixed = event.get_double_value_field(EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1);
+        let x_fixed = event.get_double_value_field(EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_2);
+        assert!((y_fixed - (-2.5)).abs() < 1.0e-4);
+        assert!((x_fixed - 0.5).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn wheel_ticks_in_continuous_scroll_converts_to_pixels() {
+        let ticks = ScrollDelta::WheelTicks { x: 1.0, y: -2.5 };
+        let converted = normalize_continuous_delta(ticks);
+        assert_eq!(converted, ScrollDelta::Pixels { x: 10.0, y: -25.0 });
+        let mut quantizer = ScrollQuantizer::default();
+        let delta = quantizer.quantize(converted, 1.0);
+        assert_eq!(delta.x, 10);
+        assert_eq!(delta.y, -25);
+        let event = continuous_scroll_event(delta, None).expect("continuous scroll event");
+        assert_eq!(
+            event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_IS_CONTINUOUS),
+            1
+        );
+        assert_eq!(
+            event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_1),
+            -25
+        );
+        assert_eq!(
+            event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_2),
+            10
+        );
     }
 }
