@@ -72,6 +72,18 @@ SLOT_BUTTON_MAP = {
 }
 
 
+def sensitivity_percent_to_raw(percent):
+    """Map the Options+ SmartShift sensitivity slider (0..100 %) to the wheel's raw
+    auto-disengage threshold, as the Options+ daemon does:
+    raw = 50 + round(-46 * percent / 100), range 4..50 (lower frees the wheel sooner).
+    Python's round() is banker's rounding; the daemon rounds half away from zero.
+    """
+    clamped = max(0, min(100, int(percent)))
+    scaled = -46 * clamped / 100
+    rounded = int(scaled - 0.5) if scaled < 0 else int(scaled + 0.5)
+    return 50 + rounded
+
+
 def parse_action(card):
     if not card:
         return "None"
@@ -162,7 +174,7 @@ def extract_settings(data):
                 if sw.get("isEnabled"):
                     dev["smartshift"] = {
                         "mode": "ratchet" if sw.get("mode") == "RATCHET" else "free",
-                        "auto_disengage": max(8, min(254, int(sw.get("sensitivity", 83)))),
+                        "auto_disengage": sensitivity_percent_to_raw(sw.get("sensitivity", 83)),
                         "tunable_torque": 0,
                     }
                 dev["smooth_wheel"] = card.get("mouseScrollWheelSettings", {}).get("isSmooth", True)
