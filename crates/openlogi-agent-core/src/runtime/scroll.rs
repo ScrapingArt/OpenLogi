@@ -15,7 +15,9 @@ mod debounce;
 mod lo_model;
 mod worker;
 
-pub use debounce::{WheelDebouncer, WheelDisturbanceFilter, WheelFluidity, WheelHysteresis};
+pub use debounce::{
+    WheelDebouncer, WheelDisturbanceFilter, WheelFluidity, WheelHysteresis, WheelReboundGuard,
+};
 pub use worker::{ScrollInputHandle, ScrollPreferences, ScrollRuntime};
 
 use std::collections::HashMap;

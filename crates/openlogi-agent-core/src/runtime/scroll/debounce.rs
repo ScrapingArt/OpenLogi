@@ -139,6 +139,71 @@ impl WheelDisturbanceFilter {
     }
 }
 
+/// Longest time after the last forward report that a reverse report can still
+/// be the wheel's mechanical bounce.
+const REBOUND_WINDOW: Duration = Duration::from_millis(150);
+
+/// Reverse travel, in notches, still treated as bounce. Measured bounces at a
+/// stop on an MX Master 3S came to 0.27 to 0.73 notch, all within 7 ms of each
+/// other and about 70 ms after the last forward report.
+const REBOUND_LIMIT_NOTCHES: f64 = 1.0;
+
+/// Swallows the wheel's spring bounce at a stop.
+///
+/// Options+ passes this bounce through (about one burst in ten ends with a
+/// reverse tail in its recordings), so this guard is an OpenLogi addition that
+/// sits upstream of the Options+ model and leaves the model itself untouched.
+/// A reverse report within [`REBOUND_WINDOW`] of the last forward report is
+/// dropped until the reverse travel exceeds [`REBOUND_LIMIT_NOTCHES`]; past
+/// that it is a deliberate reversal and passes.
+#[derive(Clone, Debug, Default)]
+pub struct WheelReboundGuard {
+    /// Direction of the last forward report, `true` for positive.
+    forward_positive: bool,
+    last_forward: Option<Instant>,
+    reverse_travel: f64,
+}
+
+impl WheelReboundGuard {
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Whether the vertical report `notches` arriving at `at` should reach the
+    /// model.
+    #[must_use]
+    pub fn admits(&mut self, notches: f64, at: Instant) -> bool {
+        if notches == 0.0 || !notches.is_finite() {
+            return true;
+        }
+        let positive = notches > 0.0;
+        let Some(last) = self.last_forward else {
+            self.forward(positive, at);
+            return true;
+        };
+        if positive == self.forward_positive {
+            self.forward(positive, at);
+            return true;
+        }
+        if at.saturating_duration_since(last) > REBOUND_WINDOW {
+            self.forward(positive, at);
+            return true;
+        }
+        self.reverse_travel += notches.abs();
+        if self.reverse_travel > REBOUND_LIMIT_NOTCHES {
+            self.forward(positive, at);
+            return true;
+        }
+        false
+    }
+
+    fn forward(&mut self, positive: bool, at: Instant) {
+        self.forward_positive = positive;
+        self.last_forward = Some(at);
+        self.reverse_travel = 0.0;
+    }
+}
+
 /// Combined debouncer protecting against middle-click disturbance and rebound ticks.
 #[derive(Clone, Debug, Default)]
 pub struct WheelDebouncer {
@@ -312,6 +377,51 @@ mod tests {
         filter.on_middle_button(false, base + Duration::from_millis(100));
         assert!(filter.is_disturbed(base + Duration::from_millis(140)));
         assert!(!filter.is_disturbed(base + Duration::from_millis(160)));
+    }
+
+    #[test]
+    fn rebound_guard_swallows_a_bounce_after_a_stop() {
+        let mut guard = WheelReboundGuard::default();
+        let base = Instant::now();
+        assert!(guard.admits(-0.13, base));
+        assert!(guard.admits(-0.13, base + Duration::from_millis(60)));
+        // The measured bounce: three reports within 7 ms, 70 ms after the last.
+        let bounce = base + Duration::from_millis(130);
+        assert!(!guard.admits(0.2, bounce));
+        assert!(!guard.admits(0.33, bounce + Duration::from_millis(1)));
+        assert!(!guard.admits(0.2, bounce + Duration::from_millis(7)));
+    }
+
+    #[test]
+    fn rebound_guard_passes_a_deliberate_reversal() {
+        let mut guard = WheelReboundGuard::default();
+        let base = Instant::now();
+        assert!(guard.admits(-0.5, base));
+        assert!(!guard.admits(0.5, base + Duration::from_millis(20)));
+        // Past one notch of reverse travel the turn is real and passes.
+        assert!(guard.admits(0.6, base + Duration::from_millis(40)));
+        // It is now the forward direction.
+        assert!(guard.admits(0.2, base + Duration::from_millis(60)));
+        assert!(!guard.admits(-0.2, base + Duration::from_millis(80)));
+    }
+
+    #[test]
+    fn rebound_guard_passes_a_reverse_report_after_the_window() {
+        let mut guard = WheelReboundGuard::default();
+        let base = Instant::now();
+        assert!(guard.admits(-0.2, base));
+        assert!(guard.admits(0.2, base + Duration::from_millis(400)));
+    }
+
+    #[test]
+    fn rebound_guard_starts_open_and_ignores_zero_and_nan() {
+        let mut guard = WheelReboundGuard::default();
+        let base = Instant::now();
+        assert!(guard.admits(0.2, base));
+        assert!(guard.admits(0.0, base));
+        assert!(guard.admits(f64::NAN, base));
+        guard.reset();
+        assert!(guard.admits(-0.2, base));
     }
 
     #[test]

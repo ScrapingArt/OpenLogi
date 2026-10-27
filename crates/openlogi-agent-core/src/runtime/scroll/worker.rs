@@ -13,7 +13,9 @@ use openlogi_core::scroll::ScrollDelta;
 use tracing::{trace, warn};
 
 use super::lo_model::LoWheelModel;
-use super::{ScrollEngine, ScrollFrame, ScrollSource, WheelDelta, WheelDisturbanceFilter};
+use super::{
+    ScrollEngine, ScrollFrame, ScrollSource, WheelDelta, WheelDisturbanceFilter, WheelReboundGuard,
+};
 use crate::runtime::HidppSessionId;
 
 /// OS-hook callbacks must fail open rather than wait for the worker.
@@ -231,6 +233,7 @@ pub struct ScrollInputHandle {
     accepting: Arc<AtomicBool>,
     preferences: Arc<ScrollPreferences>,
     disturbance: Arc<Mutex<WheelDisturbanceFilter>>,
+    rebound: Arc<Mutex<HashMap<HidppSessionId, WheelReboundGuard>>>,
 }
 
 impl ScrollInputHandle {
@@ -346,6 +349,15 @@ impl ScrollInputHandle {
             return Ok(());
         }
 
+        if let Ok(mut rebound) = self.rebound.lock()
+            && !rebound
+                .entry(session.clone())
+                .or_default()
+                .admits(impulse.y, now)
+        {
+            return Ok(());
+        }
+
         // Direction-change hysteresis is part of the wheel model, which sees
         // the report in hi-res steps; filtering whole notches here too would
         // swallow far more reversal travel than the reference does.
@@ -397,6 +409,9 @@ impl ScrollInputHandle {
 
     /// Cancel output belonging to one HID++ capture-session incarnation.
     pub(crate) fn cancel_hidpp_session(&self, session: &HidppSessionId) {
+        if let Ok(mut rebound) = self.rebound.lock() {
+            rebound.remove(session);
+        }
         let generation = self.generation.load(Ordering::Acquire);
         let source = ScrollSource::Hidpp(session.clone());
         match self
@@ -422,6 +437,9 @@ impl ScrollInputHandle {
     fn cancel_all(&self) {
         if let Ok(mut disturbance) = self.disturbance.lock() {
             *disturbance = WheelDisturbanceFilter::default();
+        }
+        if let Ok(mut rebound) = self.rebound.lock() {
+            rebound.clear();
         }
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.wake();
@@ -465,6 +483,7 @@ impl ScrollRuntime {
             accepting: Arc::new(AtomicBool::new(true)),
             preferences: Arc::clone(&preferences),
             disturbance: Arc::new(Mutex::new(WheelDisturbanceFilter::default())),
+            rebound: Arc::default(),
         };
         let worker = thread::Builder::new()
             .name("openlogi-scroll".into())
@@ -755,6 +774,7 @@ mod tests {
                 accepting: Arc::new(AtomicBool::new(true)),
                 preferences,
                 disturbance: Arc::new(Mutex::new(WheelDisturbanceFilter::default())),
+                rebound: Arc::default(),
             },
             receiver,
             control_rx,
@@ -1633,8 +1653,39 @@ mod tests {
         );
         assert!(queued_input(&receiver).impulse.y > 0.0);
 
-        // A half-notch reversal is queued whole: the model, which sees it in
-        // hi-res steps, applies the reference's one-step dead band.
+        // A reversal past the rebound guard's limit is queued whole: the
+        // model, which sees it in hi-res steps, applies the reference's
+        // one-step dead band.
+        assert_eq!(
+            input.try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, -1.5)),
+            Ok(())
+        );
+        assert!(queued_input(&receiver).impulse.y < 0.0);
+    }
+
+    #[test]
+    fn hidpp_wheel_scroll_swallows_the_bounce_right_after_a_forward_report() {
+        let (input, receiver, _controls) = standalone_input(10, preferences(true, 14));
+        let session = HidppSessionId::with_epoch("mouse-a", 1);
+
+        assert_eq!(
+            input.try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, 0.13)),
+            Ok(())
+        );
+        assert!(queued_input(&receiver).impulse.y > 0.0);
+
+        // The wheel's spring bounce at a stop never reaches the model.
+        assert_eq!(
+            input.try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, -0.5)),
+            Ok(())
+        );
+        assert!(receiver.try_recv().is_err());
+
+        input.cancel_hidpp_session(&session);
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ScrollCommand::CancelSource(_))
+        ));
         assert_eq!(
             input.try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, -0.5)),
             Ok(())
