@@ -959,6 +959,30 @@ async fn gesture_double_click_debounces_single_click() {
     tokio::time::sleep(openlogi_core::binding::DOUBLE_CLICK_TIMEOUT + Duration::from_millis(50)).await;
     assert!(ring_rx.try_recv().is_ok(), "single click fires after timeout expires");
 
+    // A press long after the fired single click is a fresh single click, not
+    // the second half of a double click.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    dispatcher.dispatch(
+        &id,
+        session.dispatch(),
+        CapturedInput::ButtonDown(ButtonId::GestureButton),
+    );
+    dispatcher.dispatch(
+        &id,
+        session.dispatch(),
+        CapturedInput::Gesture(ButtonId::GestureButton, GestureDirection::Click),
+    );
+    dispatcher.dispatch(
+        &id,
+        session.dispatch(),
+        CapturedInput::ButtonUp(ButtonId::GestureButton),
+    );
+    tokio::time::sleep(openlogi_core::binding::DOUBLE_CLICK_TIMEOUT + Duration::from_millis(50)).await;
+    assert!(
+        ring_rx.try_recv().is_ok(),
+        "a click after a fired single click must stay a single click"
+    );
+
     scroll.shutdown();
     actions.shutdown();
 }

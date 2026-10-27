@@ -183,7 +183,11 @@ impl InputDispatcher {
                 if let Some(p) = &pending {
                     p.task.abort();
                 }
-                if direction == GestureDirection::Click && pending.is_some_and(|p| p.second_down) {
+                // A finished task already fired its single click; its entry is
+                // stale and must not turn this press into a double click.
+                if direction == GestureDirection::Click
+                    && pending.is_some_and(|p| p.second_down && !p.task.is_finished())
+                {
                     direction = GestureDirection::DoubleClick;
                 }
                 let Some(action) = resolve_gesture_action(plan, button, direction) else {
@@ -224,7 +228,15 @@ impl InputDispatcher {
                 }
             }
             CapturedInput::ButtonDown(button) => {
-                if let Some(pending) = self.pending_clicks.get_mut(&(session.clone(), button)) {
+                let key_id = (session.clone(), button);
+                if self
+                    .pending_clicks
+                    .get(&key_id)
+                    .is_some_and(|pending| pending.task.is_finished())
+                {
+                    self.pending_clicks.remove(&key_id);
+                }
+                if let Some(pending) = self.pending_clicks.get_mut(&key_id) {
                     pending.task.abort();
                     pending.second_down = true;
                 }
