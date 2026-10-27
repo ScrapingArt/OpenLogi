@@ -858,6 +858,71 @@ async fn a_pointer_only_plan_refresh_keeps_a_held_gesture() {
 }
 
 #[tokio::test]
+async fn gesture_click_without_a_double_click_binding_fires_every_click_at_once() {
+    use crate::runtime::scroll::{ScrollPreferences, ScrollRuntime};
+
+    let (ring, mut ring_rx) = tokio::sync::mpsc::unbounded_channel();
+    let device_access = crate::hardware::DeviceAccess {
+        channel: Arc::default(),
+        registry: openlogi_hid::ChannelRegistry::default(),
+        receiver_access: crate::receiver_access::ReceiverAccess::default(),
+        device_io: openlogi_hid::device_io_channel().1,
+        transport_turns: crate::hardware::TransportTurns::default(),
+    };
+    let mut actions =
+        crate::runtime::ActionRuntime::new(Arc::default(), Arc::default(), device_access, ring)
+            .unwrap();
+    let mut scroll = ScrollRuntime::spawn(Arc::new(ScrollPreferences::new(
+        false,
+        VerticalScrollSensitivity::default(),
+    )))
+    .unwrap();
+    let mut dispatcher = InputDispatcher::new(GestureOutputs::new(
+        actions.dispatcher(),
+        scroll.input(),
+        Arc::default(),
+    ));
+
+    let mut configured = plan();
+    configured.dispatch.gesture_bindings.insert(
+        ButtonId::GestureButton,
+        [
+            (GestureDirection::Click, Action::ShowActionsRing),
+            (GestureDirection::DoubleClick, Action::None),
+        ]
+        .into(),
+    );
+    let session = live_session_from_plan(1, configured);
+    let id = session.id().clone();
+
+    // Two quick clicks, each well inside the debounce window.
+    for _ in 0..2 {
+        dispatcher.dispatch(
+            &id,
+            session.dispatch(),
+            CapturedInput::ButtonDown(ButtonId::GestureButton),
+        );
+        dispatcher.dispatch(
+            &id,
+            session.dispatch(),
+            CapturedInput::Gesture(ButtonId::GestureButton, GestureDirection::Click),
+        );
+        dispatcher.dispatch(
+            &id,
+            session.dispatch(),
+            CapturedInput::ButtonUp(ButtonId::GestureButton),
+        );
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+
+    assert!(ring_rx.try_recv().is_ok(), "first click fires without a debounce wait");
+    assert!(ring_rx.try_recv().is_ok(), "a quick second click is not merged into the first");
+
+    scroll.shutdown();
+    actions.shutdown();
+}
+
+#[tokio::test]
 async fn gesture_double_click_debounces_single_click() {
     use crate::runtime::scroll::{ScrollPreferences, ScrollRuntime};
 

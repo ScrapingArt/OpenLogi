@@ -195,8 +195,12 @@ impl InputDispatcher {
                     return;
                 };
 
-                let has_double_click = resolve_gesture_action(plan, button, GestureDirection::DoubleClick)
-                    .is_some_and(|a| *a != Action::None);
+                // Only an explicit double-click binding defers the single click:
+                // the Click fallback `resolve_gesture_action` applies to an
+                // unbound double click would delay every click and merge two
+                // quick ones into one.
+                let has_double_click =
+                    binds_explicitly(plan, button, GestureDirection::DoubleClick);
 
                 if direction == GestureDirection::Click && has_double_click {
                     let debounce = plan.debounce_for(button);
@@ -413,6 +417,14 @@ fn main_wheel_scroll(
         -notches
     };
     ScrollDelta::wheel_ticks(0.0, upward)
+}
+
+fn binds_explicitly(plan: &DispatchPlan, button: ButtonId, direction: GestureDirection) -> bool {
+    plan.gesture_bindings
+        .get(&button)
+        .or_else(|| plan.side_gesture_bindings.get(&button))
+        .and_then(|map| map.get(&direction))
+        .is_some_and(|action| *action != Action::None)
 }
 
 fn resolve_gesture_action<'a>(
