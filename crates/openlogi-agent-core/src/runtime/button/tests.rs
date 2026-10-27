@@ -2,7 +2,9 @@
 
 use std::time::Instant;
 
-use openlogi_core::binding::{LongPressBinding, MultiClickBinding, WheelHoldBinding};
+use openlogi_core::binding::{
+    DOUBLE_CLICK_WINDOW, LongPressBinding, MultiClickBinding, WheelHoldBinding,
+};
 
 use super::*;
 
@@ -1492,4 +1494,30 @@ fn worker_settles_a_lone_click_and_fires_a_quick_double_once() {
         }
     ));
     assert!(owner.shutdown());
+}
+
+#[test]
+fn a_binding_can_widen_or_narrow_its_own_window() {
+    let t0 = Instant::now();
+    for (window_ms, settles_at, is_inside) in [(800, 400, true), (150, 200, false)] {
+        let binding = Binding::MultiClick(
+            MultiClickBinding::new(Action::Copy, Action::Paste)
+                .with_window_ms(window_ms)
+                .expect("a window inside the allowed range"),
+        );
+        let mut state = ButtonState::default();
+        let mut events = Vec::new();
+        click_at(&mut state, &binding, 1, t0, &mut events);
+        emit_due_long_presses(
+            &mut state,
+            t0 + Duration::from_millis(settles_at),
+            &mut |e| events.push(e),
+        );
+        // Inside the window nothing has settled yet; past it the click fired.
+        assert_eq!(
+            triggered(&events).is_empty(),
+            is_inside,
+            "a {window_ms} ms window at {settles_at} ms"
+        );
+    }
 }

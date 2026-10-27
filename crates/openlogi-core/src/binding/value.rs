@@ -1,9 +1,11 @@
 //! Single-action, long-press, multi-click, wheel-hold and per-direction gesture bindings.
 
 use std::collections::BTreeMap;
+use std::ops::RangeInclusive;
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use thiserror::Error;
 
 use super::action::Action;
 use super::defaults::default_gesture_binding;
@@ -18,10 +20,23 @@ pub const LONG_PRESS_THRESHOLD: Duration = Duration::from_millis(500);
 /// is delayed by this much, which is why it stays short.
 pub const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(300);
 
+/// The window lengths, in milliseconds, a [`MultiClickBinding`] may ask for.
+/// Shorter than this a double click is not humanly reachable; longer, every
+/// single click feels broken.
+pub const DOUBLE_CLICK_WINDOW_MS: RangeInclusive<u32> = 100..=1000;
+
+/// A requested double-click window outside [`DOUBLE_CLICK_WINDOW_MS`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+#[error("double-click window {requested} ms is outside {min}..={max} ms", min = DOUBLE_CLICK_WINDOW_MS.start(), max = DOUBLE_CLICK_WINDOW_MS.end())]
+pub struct DoubleClickWindowOutOfRange {
+    /// The rejected length.
+    pub requested: u32,
+}
+
 /// Independent single-click and double-click actions of one button.
 ///
 /// A first click does not fire on press: the button waits
-/// [`DOUBLE_CLICK_WINDOW`] for a second press. A second press inside the
+/// [`DOUBLE_CLICK_WINDOW`], or its own `window_ms`, for a second press. A second press inside the
 /// window fires `double` on its release and `click` never runs; otherwise
 /// `click` fires when the window closes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,13 +44,74 @@ pub const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(300);
 pub struct MultiClickBinding {
     click: Action,
     double: Action,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_window_ms",
+        skip_serializing_if = "Option::is_none"
+    )]
+    window_ms: Option<u32>,
+}
+
+/// Reject a `window_ms` outside [`DOUBLE_CLICK_WINDOW_MS`] instead of
+/// clamping it: the config is strict, and a silent clamp would make the file
+/// say one thing and the button do another.
+fn deserialize_window_ms<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u32>, D::Error> {
+    let window = Option::<u32>::deserialize(deserializer)?;
+    match window {
+        Some(ms) if !DOUBLE_CLICK_WINDOW_MS.contains(&ms) => {
+            Err(serde::de::Error::custom(DoubleClickWindowOutOfRange {
+                requested: ms,
+            }))
+        }
+        _ => Ok(window),
+    }
 }
 
 impl MultiClickBinding {
     /// Pair a single-click action with a double-click action.
     #[must_use]
     pub const fn new(click: Action, double: Action) -> Self {
-        Self { click, double }
+        Self {
+            click,
+            double,
+            window_ms: None,
+        }
+    }
+
+    /// This binding with another single-click action; the double and the
+    /// window stay.
+    #[must_use]
+    pub fn with_click(&self, click: Action) -> Self {
+        Self {
+            click,
+            ..self.clone()
+        }
+    }
+
+    /// Wait `window_ms` milliseconds for the second click instead of
+    /// [`DOUBLE_CLICK_WINDOW`].
+    ///
+    /// # Errors
+    ///
+    /// [`DoubleClickWindowOutOfRange`] when `window_ms` is outside
+    /// [`DOUBLE_CLICK_WINDOW_MS`].
+    pub fn with_window_ms(mut self, window_ms: u32) -> Result<Self, DoubleClickWindowOutOfRange> {
+        if !DOUBLE_CLICK_WINDOW_MS.contains(&window_ms) {
+            return Err(DoubleClickWindowOutOfRange {
+                requested: window_ms,
+            });
+        }
+        self.window_ms = Some(window_ms);
+        Ok(self)
+    }
+
+    /// How long a released first click waits for its second.
+    #[must_use]
+    pub fn window(&self) -> Duration {
+        self.window_ms
+            .map_or(DOUBLE_CLICK_WINDOW, |ms| Duration::from_millis(ms.into()))
     }
 
     /// Action fired when the window closes without a second click.

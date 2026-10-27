@@ -891,3 +891,53 @@ fn multi_click_clicks_with_its_click_action_and_has_no_directions() {
         "gesture mode keeps the single click and drops the double"
     );
 }
+
+#[test]
+fn multi_click_window_defaults_roundtrips_and_rejects_values_outside_its_range() {
+    let default = MultiClickBinding::new(Action::Copy, Action::Paste);
+    assert_eq!(default.window(), DOUBLE_CLICK_WINDOW);
+
+    let wide = default.clone().with_window_ms(750).expect("in range");
+    assert_eq!(wide.window(), std::time::Duration::from_millis(750));
+    let back = binding_roundtrip(BTreeMap::from([(
+        ButtonId::Back,
+        Binding::MultiClick(wide.clone()),
+    )]));
+    assert_eq!(back[&ButtonId::Back], Binding::MultiClick(wide));
+
+    let default_toml = toml::to_string_pretty(&BindingWrapper {
+        bindings: BTreeMap::from([(ButtonId::Back, Binding::MultiClick(default))]),
+    })
+    .expect("serialize");
+    assert!(
+        !default_toml.contains("window_ms"),
+        "an unset window stays out of the file"
+    );
+
+    for (ms, accepted) in [
+        (99, false),
+        (100, true),
+        (1000, true),
+        (1001, false),
+        (0, false),
+    ] {
+        let toml =
+            format!("[bindings.Back]\nclick = \"Copy\"\ndouble = \"Paste\"\nwindow_ms = {ms}");
+        assert_eq!(
+            toml::from_str::<BindingWrapper>(&toml).is_ok(),
+            accepted,
+            "window_ms = {ms}"
+        );
+        assert_eq!(
+            MultiClickBinding::new(Action::Copy, Action::Paste)
+                .with_window_ms(ms)
+                .is_ok(),
+            accepted,
+            "with_window_ms({ms})"
+        );
+    }
+    toml::from_str::<BindingWrapper>(
+        "[bindings.Back]\nclick = \"Copy\"\ndouble = \"Paste\"\nwindow_ms = -5",
+    )
+    .expect_err("a negative window is no window");
+}

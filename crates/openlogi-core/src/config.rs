@@ -59,7 +59,8 @@ use crate::binding::{Binding, ButtonId, GestureDirection};
 /// persisted shape or enum vocabulary changes; readers inspect this value
 /// before consuming the rest of the file.
 ///
-/// v11 adds `{ click = ..., double = ... }` multi-click button bindings.
+/// v11 adds `{ click = ..., double = ..., window_ms = ... }` multi-click button
+/// bindings (`window_ms` is optional).
 /// Nothing older needs migrating; the bump makes a v10 build refuse a file
 /// that may hold one at the version check, instead of failing on the binding
 /// shape.

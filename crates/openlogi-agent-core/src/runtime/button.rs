@@ -14,9 +14,7 @@ use std::sync::mpsc;
 use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
-use openlogi_core::binding::{
-    Action, Binding, ButtonId, DOUBLE_CLICK_WINDOW, LONG_PRESS_THRESHOLD,
-};
+use openlogi_core::binding::{Action, Binding, ButtonId, LONG_PRESS_THRESHOLD};
 use tracing::warn;
 
 use super::ActionDispatchTarget;
@@ -205,6 +203,8 @@ enum PressBehavior {
     MultiClickDown {
         click: Action,
         double: Action,
+        /// How long the release waits for a second click.
+        window: Duration,
         /// When the producer saw the edge, so a press the worker only reaches
         /// late is still judged against the window it fell in.
         pressed_at: Instant,
@@ -231,6 +231,7 @@ impl PressBehavior {
             Some(Binding::MultiClick(binding)) => Self::MultiClickDown {
                 click: binding.click().clone(),
                 double: binding.double().clone(),
+                window: binding.window(),
                 pressed_at,
             },
             Some(Binding::LongPress(binding)) => Self::LongPressPending {
@@ -451,11 +452,16 @@ impl ButtonState {
             return false;
         };
         match &press.behavior {
-            PressBehavior::MultiClickDown { click, double, .. } => {
+            PressBehavior::MultiClickDown {
+                click,
+                double,
+                window,
+                ..
+            } => {
                 press.behavior = PressBehavior::MultiClickAwaiting {
                     click: click.clone(),
                     double: double.clone(),
-                    deadline: released_at + DOUBLE_CLICK_WINDOW,
+                    deadline: released_at + *window,
                 };
                 true
             }

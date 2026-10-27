@@ -43,6 +43,6 @@ pub use swipe::{
     GESTURE_SWIPE_THRESHOLD, SwipeAccumulator, detect_swipe,
 };
 pub use value::{
-    Binding, DOUBLE_CLICK_WINDOW, HeldWheel, LONG_PRESS_THRESHOLD, LongPressBinding,
-    MultiClickBinding, WheelHoldBinding,
+    Binding, DOUBLE_CLICK_WINDOW, DOUBLE_CLICK_WINDOW_MS, DoubleClickWindowOutOfRange, HeldWheel,
+    LONG_PRESS_THRESHOLD, LongPressBinding, MultiClickBinding, WheelHoldBinding,
 };

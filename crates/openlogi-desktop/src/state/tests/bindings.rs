@@ -583,12 +583,16 @@ fn gesture_maps_cover_every_gesture_mode_button() {
 }
 
 #[test]
-fn picking_a_click_action_preserves_the_double_click_action() {
+fn picking_a_click_action_preserves_the_double_click_action_and_window() {
     let mut config = Config::ephemeral();
     config.set_binding(
         KNOWN_MOUSE_KEY,
         ButtonId::Back,
-        Binding::MultiClick(MultiClickBinding::new(Action::Copy, Action::MissionControl)),
+        Binding::MultiClick(
+            MultiClickBinding::new(Action::Copy, Action::MissionControl)
+                .with_window_ms(750)
+                .expect("a window in range"),
+        ),
     );
     let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -604,10 +608,11 @@ fn picking_a_click_action_preserves_the_double_click_action() {
             .config
             .stored_bindings(KNOWN_MOUSE_KEY)
             .get(&ButtonId::Back),
-        Some(&Binding::MultiClick(MultiClickBinding::new(
-            Action::Paste,
-            Action::MissionControl
-        )))
+        Some(&Binding::MultiClick(
+            MultiClickBinding::new(Action::Paste, Action::MissionControl)
+                .with_window_ms(750)
+                .expect("a window in range")
+        ))
     );
     assert_eq!(state.button_bindings()[&ButtonId::Back], Action::Paste);
 }

@@ -435,7 +435,9 @@ A `{ click = ..., double = ... }` binding tells a single click from a double
 click. A press does not fire on its own: if a second press follows within 300 ms
 of the first release, `double` fires when that second press is released and
 `click` never runs; otherwise `click` fires when the 300 ms have passed. Every
-single click on such a button is therefore delayed by that window. If capture
+single click on such a button is therefore delayed by that window. Add
+`window_ms` (100 through 1000; a value outside that range stops the load) to
+use a different window for that button. If capture
 is interrupted, the binding changes, or the agent shuts down while the button
 is waiting, neither action fires. A source that can only report an
 instantaneous button pulse counts each pulse as one complete click. A
@@ -444,7 +446,8 @@ already up by then.
 
 Long-press and double-click pairs currently apply to global device `bindings`
 and are authored in TOML. The GUI presents their `short` (or `click`) action;
-changing that button in the GUI keeps a double-click pair's `double`.
+changing that button in the GUI keeps a double-click pair's `double` and
+`window_ms`.
 `per_app_bindings` and `keyboard.bindings` remain single-action maps.
 
 A wheel-hold binding on `Back` or `Forward` turns the main scroll wheel into a
