@@ -215,18 +215,22 @@ pub struct AppSettings {
     /// Takes effect on agent restart.
     #[serde(default = "default_true")]
     pub capture_mouse_events: bool,
-    /// Whether ordinary mouse-wheel input is replaced with a finite smooth
-    /// scroll animation. **Off by default**: while enabled the OS hook
-    /// suppresses eligible physical wheel events only after its non-blocking
-    /// scroll worker accepts them. Trackpad and other continuous pixel input
-    /// remains native. Windows' low-level hook cannot attribute wheel messages
-    /// to a device, so the preference applies to every traditional mouse-wheel
-    /// message there.
+    /// Whether ordinary mouse-wheel input is replaced with Logi Options+-style
+    /// wheel output (an EMA-driven gain applied to every wheel report, one
+    /// phaseless pixel event per report, no easing or momentum). **Off by
+    /// default**: while enabled the OS hook suppresses eligible physical wheel
+    /// events only after its non-blocking scroll worker accepts them. Trackpad
+    /// and other continuous pixel input remains native. Windows' low-level hook
+    /// cannot attribute wheel messages to a device, so the preference applies
+    /// to every traditional mouse-wheel message there.
     #[serde(default)]
     pub smooth_scroll: bool,
-    /// Distance multiplier for traditional vertical mouse-wheel input.
-    /// [`VerticalScrollSensitivity::DEFAULT`] means 1×; trackpad and other
-    /// continuous pixel input is never scaled.
+    /// Traditional vertical mouse-wheel sensitivity. Without smooth scroll it
+    /// is a plain distance multiplier ([`VerticalScrollSensitivity::DEFAULT`]
+    /// means 1×). With smooth scroll it selects the Options+ speed setting
+    /// ([`VerticalScrollSensitivity::lo_speed_setting`]; the default is
+    /// Options+'s default). Trackpad and other continuous pixel input is never
+    /// scaled.
     #[serde(default)]
     pub vertical_scroll_sensitivity: VerticalScrollSensitivity,
     /// Which app icon the user picked. Applied at launch, and whenever it
@@ -371,6 +375,26 @@ impl VerticalScrollSensitivity {
     #[must_use]
     pub fn scroll_multiplier(self) -> f64 {
         f64::from(self.into_inner()) / f64::from(Self::DEFAULT.into_inner())
+    }
+
+    /// The Logi Options+ "scrolling speed" setting in `[-1, 1]` this slider
+    /// position stands for; the smooth main-wheel model maps it linearly onto
+    /// its speed scalar `s` in `[0.06, 1.2]`.
+    ///
+    /// Piecewise linear and monotonic, anchored so that [`Self::DEFAULT`]
+    /// is exactly `0.0` (Options+'s default, `s = 0.63`), the minimum is `-1.0`
+    /// and the maximum is `1.0`. The two sides have different slopes because
+    /// the default sits near the bottom of OpenLogi's scale, whereas Options+'s
+    /// default is its midpoint.
+    #[must_use]
+    pub fn lo_speed_setting(self) -> f64 {
+        let raw = f64::from(self.into_inner());
+        let default = f64::from(Self::DEFAULT.into_inner());
+        if raw <= default {
+            (raw - default) / (default - f64::from(SENSITIVITY_MIN))
+        } else {
+            (raw - default) / (f64::from(SENSITIVITY_MAX) - default)
+        }
     }
 }
 
@@ -867,6 +891,27 @@ mod tests {
             ThumbwheelSensitivity::from_rounded(f32::INFINITY),
             ThumbwheelSensitivity::MAX
         );
+    }
+
+    #[test]
+    fn vertical_sensitivity_maps_monotonically_onto_the_options_plus_speed_range() {
+        let speed = |raw| {
+            VerticalScrollSensitivity::try_new(raw)
+                .unwrap()
+                .lo_speed_setting()
+        };
+        assert!(
+            speed(14).abs() < f64::EPSILON,
+            "default is the Options+ default"
+        );
+        assert!((speed(1) + 1.0).abs() < 1e-12);
+        assert!((speed(100) - 1.0).abs() < 1e-12);
+        let mut previous = f64::NEG_INFINITY;
+        for raw in 1..=100 {
+            let value = speed(raw);
+            assert!(value > previous && (-1.0..=1.0).contains(&value), "{raw}");
+            previous = value;
+        }
     }
 
     #[test]
