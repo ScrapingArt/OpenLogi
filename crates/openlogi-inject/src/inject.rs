@@ -635,11 +635,16 @@ pub enum SmoothScrollPhase {
     Cancelled,
 }
 
-/// Synthesise one frame of a finite smooth-scroll animation.
+/// Continuous points per wheel tick for tick-based smooth output (an
+/// approximation of one notch at Options+'s gain of 1, 100 / 7.714 = 12.96 pt).
+/// The main wheel's pixels come from the Options+ wheel model instead and are
+/// posted by [`post_wheel_pixels`].
+pub(crate) const CONTINUOUS_POINTS_PER_TICK: f64 = 13.0;
+
+/// Synthesise one frame of a smooth-scroll animation.
 ///
-/// On macOS wheel ticks become phaseless continuous pixel events at ten
-/// points per tick, matching the line/point relationship carried in native
-/// continuous events. Other platforms preserve fractional wheel ticks through
+/// On macOS wheel ticks become phaseless continuous pixel events at
+/// `CONTINUOUS_POINTS_PER_TICK` points per tick. Other platforms preserve fractional wheel ticks through
 /// their native high-resolution output. Non-finite distance is rejected at
 /// this I/O boundary, and zero-distance frames are dropped everywhere.
 pub fn post_smooth_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
@@ -653,6 +658,40 @@ pub fn post_smooth_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
         _ => {
             let _ = phase;
             post_scroll(delta);
+        }
+    }
+}
+
+/// The wheel-tick delta backends without pixel output (Windows, Linux) post
+/// for `pixels` of Options+ wheel-model output.
+#[cfg(any(test, not(target_os = "macos")))]
+fn wheel_pixels_as_ticks(pixels: i32) -> ScrollDelta {
+    ScrollDelta::wheel_ticks(0.0, f64::from(pixels) / CONTINUOUS_POINTS_PER_TICK)
+}
+
+/// Synthesise one vertical wheel event exactly as Logi Options+ posts it.
+///
+/// `pixels` is the integer pixel distance (positive scrolls up; no scaling or
+/// quantizing happens here) and `line_delta` the accumulated line distance,
+/// zero on most events. On macOS this is a phaseless continuous pixel event
+/// (`scrollPhase = 0`, `momentumPhase = 0`, `isContinuous = 1`) whose integer
+/// line field is `trunc(line_delta)` and whose fixed-point line field is
+/// `round(line_delta)`, as in captured Options+ events. Other platforms inject
+/// the pixels as fractional wheel ticks at `CONTINUOUS_POINTS_PER_TICK`
+/// pixels each (`wheel_pixels_as_ticks`): the Windows and Linux backends
+/// take wheel ticks only and drop pixel deltas, and their quantizers carry the
+/// fraction. Zero pixels and non-finite lines are dropped.
+pub fn post_wheel_pixels(pixels: i32, line_delta: f64) {
+    if pixels == 0 || !line_delta.is_finite() {
+        return;
+    }
+    cfg_select! {
+        target_os = "macos" => {
+            macos::post_wheel_pixels(pixels, line_delta);
+        }
+        _ => {
+            let _ = line_delta;
+            post_scroll(wheel_pixels_as_ticks(pixels));
         }
     }
 }
@@ -753,7 +792,29 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     use super::{HeldKey, HeldOutput, HoldTransition};
-    use super::{QuantizedScroll, ScrollQuantizer};
+    use super::{QuantizedScroll, ScrollQuantizer, wheel_pixels_as_ticks};
+
+    /// Windows and Linux reject pixel deltas, so wheel-model pixels must reach
+    /// them as wheel ticks of the right sign and size.
+    #[test]
+    fn wheel_model_pixels_become_wheel_ticks_off_macos() {
+        let ScrollDelta::WheelTicks { x, y } = wheel_pixels_as_ticks(26) else {
+            panic!("wheel-model pixels must not stay pixel deltas");
+        };
+        assert!(x.abs() < f64::EPSILON && (y - 2.0).abs() < 1e-12, "{x} {y}");
+        assert_eq!(
+            wheel_pixels_as_ticks(-13),
+            ScrollDelta::wheel_ticks(0.0, -1.0)
+        );
+
+        // A run of model pixels keeps its cumulative distance through the
+        // backend quantizer: 13 reports of 12 px are 156 px = 12 ticks.
+        let mut quantizer = ScrollQuantizer::default();
+        let total: i32 = (0..13)
+            .map(|_| quantizer.quantize(wheel_pixels_as_ticks(12), 120.0).y)
+            .sum();
+        assert_eq!(total, 12 * 120);
+    }
 
     /// Synthetic high-resolution input: eight eighth-ticks must total exactly
     /// one Windows/Linux wheel detent (120 raw units). This is deterministic

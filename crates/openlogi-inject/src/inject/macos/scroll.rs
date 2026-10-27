@@ -1,6 +1,8 @@
 //! Synthetic scroll on macOS: the one-tick scroll actions, the fractional wheel, and the continuous smooth-scroll phases.
 
-use crate::inject::{QuantizedScroll, ScrollQuantizer, SmoothScrollPhase};
+use crate::inject::{
+    CONTINUOUS_POINTS_PER_TICK, QuantizedScroll, ScrollQuantizer, SmoothScrollPhase,
+};
 use core_graphics::event::{CGEvent, CGEventTapLocation, EventField, ScrollEventUnit};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use openlogi_core::scroll::ScrollDelta;
@@ -77,9 +79,6 @@ pub(in crate::inject) fn post_phased_scroll(delta: ScrollDelta, phase: SmoothScr
     post_continuous_scroll(delta, Some(phase));
 }
 
-/// Base continuous points per wheel tick, calibrated to Logi Options+ (100.0 / 7.67857 ≈ 13.02 pt).
-pub(crate) const CONTINUOUS_POINTS_PER_TICK: f64 = 13.0;
-
 /// Normalize incoming scroll deltas to pixels for continuous injection.
 pub(crate) const fn normalize_continuous_delta(delta: ScrollDelta) -> ScrollDelta {
     match delta {
@@ -89,6 +88,48 @@ pub(crate) const fn normalize_continuous_delta(delta: ScrollDelta) -> ScrollDelt
             y: y * CONTINUOUS_POINTS_PER_TICK,
         },
     }
+}
+
+/// Post one main-wheel event with the exact fields Options+ writes: integer
+/// pixels (no quantizer, the model already carries its remainder), phaseless,
+/// continuous, line field `trunc(lines)` and fixed-point line field
+/// `round(lines)`, both zero while the line accumulator has not flushed.
+pub(in crate::inject) fn post_wheel_pixels(pixels: i32, line_delta: f64) {
+    if let Some(event) = wheel_pixel_event(pixels, line_delta) {
+        event.post(CGEventTapLocation::HID);
+    }
+}
+
+fn wheel_pixel_event(pixels: i32, line_delta: f64) -> Option<CGEvent> {
+    let Ok(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+        tracing::warn!("CGEventSource::new failed for wheel pixels");
+        return None;
+    };
+    let Ok(event) = CGEvent::new_scroll_event(source, ScrollEventUnit::PIXEL, 2, pixels, 0, 0)
+    else {
+        tracing::warn!("CGEvent::new_scroll_event failed for wheel pixels");
+        return None;
+    };
+    event.set_integer_value_field(EventField::SCROLL_WHEEL_EVENT_IS_CONTINUOUS, 1);
+    // Same write order as `set_continuous_axis`: lines first, points last.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "line deltas are a few lines"
+    )]
+    event.set_integer_value_field(
+        EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1,
+        line_delta.trunc() as i64,
+    );
+    event.set_double_value_field(
+        EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1,
+        line_delta.round(),
+    );
+    event.set_integer_value_field(
+        EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_1,
+        pixels.into(),
+    );
+    tag_synthetic(&event);
+    Some(event)
 }
 
 /// Post one continuous pixel event, phaseless (`None`) or stamped with a
@@ -380,10 +421,36 @@ mod tests {
             event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_2),
             32768
         );
-        let y_fixed = event.get_double_value_field(EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1);
-        let x_fixed = event.get_double_value_field(EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_2);
+        let y_fixed =
+            event.get_double_value_field(EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1);
+        let x_fixed =
+            event.get_double_value_field(EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_2);
         assert!((y_fixed - (-2.5)).abs() < 1.0e-4);
         assert!((x_fixed - 0.5).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn wheel_pixel_event_matches_options_plus_fields() {
+        let event = wheel_pixel_event(-15, -1.5).expect("event");
+        let int = |f| event.get_integer_value_field(f);
+        assert_eq!(int(EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_1), -15);
+        assert_eq!(int(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1), -1);
+        assert_eq!(int(EventField::SCROLL_WHEEL_EVENT_IS_CONTINUOUS), 1);
+        assert_eq!(int(SCROLL_PHASE), 0);
+        assert_eq!(int(MOMENTUM_PHASE), 0);
+        let fixed =
+            event.get_double_value_field(EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1);
+        assert!((fixed + 2.0).abs() < 1e-4, "{fixed}");
+
+        let plain = wheel_pixel_event(-3, 0.0).expect("event");
+        assert_eq!(
+            plain.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_1),
+            -3
+        );
+        assert_eq!(
+            plain.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1),
+            0
+        );
     }
 
     #[test]

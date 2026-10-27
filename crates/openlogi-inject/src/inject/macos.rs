@@ -88,7 +88,7 @@ use keyboard_layout::layout_key;
 use keycode::hid_usage_to_macos;
 use menu_shortcut::{MenuPress, MenuShortcut};
 use scroll::dispatch_scroll;
-pub(super) use scroll::{post_phased_scroll, post_scroll, post_smooth_scroll};
+pub(super) use scroll::{post_phased_scroll, post_scroll, post_smooth_scroll, post_wheel_pixels};
 pub use spaces::post_live_drag as post_live_space_drag;
 pub use spaces::post_magnification;
 pub(super) use spaces::{natural_scrolling, set_desktop_switch};
