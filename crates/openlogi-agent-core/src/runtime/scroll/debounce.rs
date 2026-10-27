@@ -18,9 +18,6 @@ const HYSTERESIS_RELAX_WINDOW: Duration = Duration::from_millis(1000);
 /// Middle-click disturbance suppression window (150ms in Logi Options+).
 const DISTURBANCE_ACTIVE_TIMEOUT: Duration = Duration::from_millis(150);
 
-/// Middle-click post-release suppression window (100ms in Logi Options+).
-const DISTURBANCE_STOP_TIMEOUT: Duration = Duration::from_millis(100);
-
 /// Exponential Moving Average smoothing factor for wheel velocity (0.05 / 0.95 in Logi Options+).
 const SPEED_EMA_ALPHA: f64 = 0.05;
 
@@ -117,38 +114,28 @@ impl WheelHysteresis {
 
 /// Middle button disturbance filter.
 ///
-/// Clicking the mouse wheel physically depresses the switch, often causing
-/// accidental 1-2 tick micro-rotations. Suppresses micro-scrolls while the
-/// middle button is pressed and for 100ms after release.
+/// Clicking the mouse wheel can jolt it by a notch or two. Like Logi Options+,
+/// drops wheel input for `DISTURBANCE_ACTIVE_TIMEOUT` after the press; the
+/// release does not extend it. (The reference also keeps swallowing a wheel
+/// that was already spinning at the press until it changes direction or
+/// speeds up; captured Options+ output around clicks showed no effect from
+/// either rule, so only the fixed window is kept.)
 #[derive(Clone, Debug, Default)]
 pub struct WheelDisturbanceFilter {
-    pressed: bool,
     press_instant: Option<Instant>,
-    release_instant: Option<Instant>,
 }
 
 impl WheelDisturbanceFilter {
     pub fn on_middle_button(&mut self, pressed: bool, at: Instant) {
-        self.pressed = pressed;
         if pressed {
             self.press_instant = Some(at);
-        } else {
-            self.release_instant = Some(at);
         }
     }
 
     #[must_use]
     pub fn is_disturbed(&self, at: Instant) -> bool {
-        if self.pressed {
-            if let Some(press_time) = self.press_instant {
-                return at.saturating_duration_since(press_time) <= DISTURBANCE_ACTIVE_TIMEOUT;
-            }
-            return true;
-        }
-        if let Some(release_time) = self.release_instant {
-            return at.saturating_duration_since(release_time) <= DISTURBANCE_STOP_TIMEOUT;
-        }
-        false
+        self.press_instant
+            .is_some_and(|press| at.saturating_duration_since(press) <= DISTURBANCE_ACTIVE_TIMEOUT)
     }
 }
 
@@ -300,10 +287,8 @@ mod tests {
         let base = Instant::now();
 
         // Idle for 5 seconds from start
-        let first_tick = filter.filter(
-            WheelDelta { x: 0.0, y: 1.0 },
-            base + Duration::from_secs(5),
-        );
+        let first_tick =
+            filter.filter(WheelDelta { x: 0.0, y: 1.0 }, base + Duration::from_secs(5));
         assert_eq!(
             first_tick,
             WheelDelta { x: 0.0, y: 1.0 },
@@ -323,10 +308,10 @@ mod tests {
         assert!(filter.is_disturbed(base + Duration::from_millis(150)));
         assert!(!filter.is_disturbed(base + Duration::from_millis(200)));
 
-        let release = base + Duration::from_millis(250);
-        filter.on_middle_button(false, release);
-        assert!(filter.is_disturbed(release + Duration::from_millis(50)));
-        assert!(!filter.is_disturbed(release + Duration::from_millis(150)));
+        // Releasing neither extends nor ends the window.
+        filter.on_middle_button(false, base + Duration::from_millis(100));
+        assert!(filter.is_disturbed(base + Duration::from_millis(140)));
+        assert!(!filter.is_disturbed(base + Duration::from_millis(160)));
     }
 
     #[test]
@@ -348,10 +333,8 @@ mod tests {
         assert!(fast_duration < ANIMATION_DURATION);
 
         // Wait 1 second (idle pause)
-        let after_pause = fluidity.adapt(
-            WheelDelta { x: 0.0, y: 1.0 },
-            base + Duration::from_secs(1),
-        );
+        let after_pause =
+            fluidity.adapt(WheelDelta { x: 0.0, y: 1.0 }, base + Duration::from_secs(1));
         assert_eq!(
             after_pause, ANIMATION_DURATION,
             "subsequent single click after pause must reset to standard duration"

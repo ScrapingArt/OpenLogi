@@ -2,20 +2,18 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use openlogi_core::config::VerticalScrollSensitivity;
 use openlogi_core::scroll::ScrollDelta;
-use tracing::warn;
+use tracing::{trace, warn};
 
-use super::{
-    ScrollEngine, ScrollFrame, ScrollSource, WheelDelta, WheelDisturbanceFilter,
-    WheelHysteresis,
-};
+use super::lo_model::LoWheelModel;
+use super::{ScrollEngine, ScrollFrame, ScrollSource, WheelDelta, WheelDisturbanceFilter};
 use crate::runtime::HidppSessionId;
 
 /// OS-hook callbacks must fail open rather than wait for the worker.
@@ -58,7 +56,7 @@ impl ScrollPreferences {
         );
     }
 
-    /// Whether finite smooth scrolling is currently enabled.
+    /// Whether Options+-style wheel output is currently enabled.
     #[must_use]
     pub fn smooth_scroll_enabled(&self) -> bool {
         self.load().smooth_scroll
@@ -99,9 +97,10 @@ enum ScrollOutputMode {
     Phased {
         at: Instant,
     },
-    /// Eased whatever the app-wide smoothing setting: a diverted main wheel,
-    /// whose own per-device switch asked for smoothing by diverting it.
-    Eased {
+    /// Main-wheel output of the Options+ model whatever the app-wide smoothing
+    /// setting: a diverted main wheel, whose own per-device switch asked for
+    /// it by diverting the wheel.
+    MainWheel {
         at: Instant,
     },
     Direct,
@@ -138,7 +137,7 @@ impl ScrollInput {
     /// recognizers need.
     fn output_under(&self, smoothing: bool) -> ScrollOutputMode {
         match (self.output, &self.source) {
-            (ScrollOutputMode::Eased { at }, _) => ScrollOutputMode::Eased { at },
+            (ScrollOutputMode::MainWheel { at }, _) => ScrollOutputMode::MainWheel { at },
             (
                 ScrollOutputMode::Smooth { at } | ScrollOutputMode::Phased { at },
                 ScrollSource::Hidpp(_),
@@ -232,7 +231,6 @@ pub struct ScrollInputHandle {
     accepting: Arc<AtomicBool>,
     preferences: Arc<ScrollPreferences>,
     disturbance: Arc<Mutex<WheelDisturbanceFilter>>,
-    session_debouncers: Arc<Mutex<HashMap<String, WheelHysteresis>>>,
 }
 
 impl ScrollInputHandle {
@@ -246,9 +244,17 @@ impl ScrollInputHandle {
     /// Queue one ordinary wheel impulse from the current OS-hook thread.
     ///
     /// Pixel input, zero/non-finite distance, a full queue, or an unavailable
-    /// worker are rejected so the callback fails open. With smoothing disabled,
-    /// only a changed vertical distance is accepted; the worker emits that
-    /// distance directly and the callback remains injection-free.
+    /// worker are rejected so the callback fails open. With smoothing on, the
+    /// raw ticks reach the Options+ wheel model unscaled.
+    ///
+    /// A diagonal event is accepted whole and the worker splits it into two
+    /// posts, the vertical one through the model and the horizontal one
+    /// untouched, so an application sees two events for one physical one.
+    /// The callback time stamps the tick (the OS event's own time is not
+    /// plumbed through the hook), so ticks delivered in one batch share the
+    /// model's 8 ms period floor. With smoothing
+    /// disabled, only a changed vertical distance is accepted; the worker emits
+    /// that distance directly and the callback remains injection-free.
     #[must_use]
     pub fn try_hook_scroll(&self, delta: ScrollDelta) -> bool {
         if !self.accepting.load(Ordering::Acquire) {
@@ -259,20 +265,28 @@ impl ScrollInputHandle {
         };
 
         let preferences = self.preferences.load();
+        let now = Instant::now();
+        if preferences.smooth_scroll {
+            // The wheel model owns the speed setting; no pre-scaling here.
+            return self.try_enqueue(
+                ScrollSource::current_hook(),
+                impulse,
+                ScrollOutputMode::Smooth { at: now },
+            );
+        }
         let Some(scaled) =
             impulse.with_vertical_scale(preferences.vertical_sensitivity.scroll_multiplier())
         else {
             return false;
         };
-        let now = Instant::now();
-        let output = if preferences.smooth_scroll {
-            ScrollOutputMode::Smooth { at: now }
-        } else if scaled != impulse {
-            ScrollOutputMode::Direct
-        } else {
+        if scaled == impulse {
             return false;
-        };
-        self.try_enqueue(ScrollSource::current_hook(), scaled, output)
+        }
+        self.try_enqueue(
+            ScrollSource::current_hook(),
+            scaled,
+            ScrollOutputMode::Direct,
+        )
     }
 
     /// Queue one diverted thumb-wheel impulse from an active HID++ session.
@@ -303,18 +317,19 @@ impl ScrollInputHandle {
 
     /// Queue one diverted main-wheel impulse from an active HID++ session.
     ///
-    /// Always eased, whatever the app-wide smoothing setting says: the
-    /// device's own smooth-wheel switch is what diverted the wheel. The
-    /// vertical distance is scaled by the main-wheel sensitivity, as the hook
-    /// scales a native wheel.
+    /// Always run through the Options+ wheel model, whatever the app-wide
+    /// smoothing setting says: the device's own smooth-wheel switch is what
+    /// diverted the wheel. The queued distance is unscaled (the model applies
+    /// the sensitivity as its speed setting).
     ///
     /// # Errors
     ///
     /// The distance the already-diverted caller must inject directly when the
-    /// runtime is stopped or its queue is full. It carries the same
-    /// sensitivity scaling, so a refused report scrolls as far as a queued
-    /// one. A delta that cannot be eased (not finite wheel ticks, or zero)
-    /// comes back as given.
+    /// runtime is stopped or its queue is full, scaled by the plain
+    /// sensitivity multiplier (gain 1: with the worker unavailable there is no
+    /// model state to shape it, and the hook path's fallback of passing the
+    /// native event through is equally unshaped). A delta the model cannot take (not finite wheel
+    /// ticks, or zero) comes back as given.
     pub(crate) fn try_hidpp_wheel_scroll(
         &self,
         session: &HidppSessionId,
@@ -331,33 +346,23 @@ impl ScrollInputHandle {
             return Ok(());
         }
 
-        let impulse = if let Ok(mut debouncers) = self.session_debouncers.lock() {
-            let key = session.device_key();
-            let hysteresis = if let Some(existing) = debouncers.get_mut(key) {
-                existing
-            } else {
-                debouncers.entry(key.to_owned()).or_default()
-            };
-            hysteresis.filter(impulse, now)
-        } else {
-            impulse
-        };
-
-        if impulse.is_zero() {
+        // Direction-change hysteresis is part of the wheel model, which sees
+        // the report in hi-res steps; filtering whole notches here too would
+        // swallow far more reversal travel than the reference does.
+        let queued = self.accepting.load(Ordering::Acquire)
+            && self.try_enqueue(
+                ScrollSource::Hidpp(session.clone()),
+                impulse,
+                ScrollOutputMode::MainWheel { at: now },
+            );
+        if queued {
             return Ok(());
         }
-
         let multiplier = self.preferences.vertical_sensitivity().scroll_multiplier();
         let Some(scaled) = impulse.with_vertical_scale(multiplier) else {
             return Err(delta);
         };
-        let queued = self.accepting.load(Ordering::Acquire)
-            && self.try_enqueue(
-                ScrollSource::Hidpp(session.clone()),
-                scaled,
-                ScrollOutputMode::Eased { at: now },
-            );
-        if queued { Ok(()) } else { Err(scaled.into()) }
+        Err(scaled.into())
     }
 
     fn try_enqueue(
@@ -392,9 +397,6 @@ impl ScrollInputHandle {
 
     /// Cancel output belonging to one HID++ capture-session incarnation.
     pub(crate) fn cancel_hidpp_session(&self, session: &HidppSessionId) {
-        if let Ok(mut debouncers) = self.session_debouncers.lock() {
-            debouncers.remove(session.device_key());
-        }
         let generation = self.generation.load(Ordering::Acquire);
         let source = ScrollSource::Hidpp(session.clone());
         match self
@@ -420,9 +422,6 @@ impl ScrollInputHandle {
     fn cancel_all(&self) {
         if let Ok(mut disturbance) = self.disturbance.lock() {
             *disturbance = WheelDisturbanceFilter::default();
-        }
-        if let Ok(mut debouncers) = self.session_debouncers.lock() {
-            debouncers.clear();
         }
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.wake();
@@ -466,7 +465,6 @@ impl ScrollRuntime {
             accepting: Arc::new(AtomicBool::new(true)),
             preferences: Arc::clone(&preferences),
             disturbance: Arc::new(Mutex::new(WheelDisturbanceFilter::default())),
-            session_debouncers: Arc::new(Mutex::new(HashMap::new())),
         };
         let worker = thread::Builder::new()
             .name("openlogi-scroll".into())
@@ -547,25 +545,56 @@ fn receive_command(
     )
 }
 
-fn accelerate_impulse(
-    accelerations: &mut HashMap<ScrollSource, super::WheelAcceleration>,
+/// Run one main-wheel report through the source's Options+ model and return
+/// the frames to post: the model's pixels (skipped when zero: Options+ posts
+/// such events in 0.14% of captured reports and they carry no line delta, so
+/// dropping them changes nothing visible) and, for a tick-based thumb wheel
+/// riding the hook path, its untouched horizontal distance.
+///
+/// Both entry points arrive as fractional notches (a diverted HID++ report is
+/// `steps / per_notch`), which is exactly what the model takes: the device's
+/// wheel multiplier cancels out of the physics, and a sub-step report
+/// contributes its fraction instead of being rounded away. An OS-hook tick has
+/// no hi-res steps; it is fed as one whole report per tick. That cannot be
+/// spread over the following milliseconds without a timer (and Options+ has
+/// none), so a hooked wheel produces one larger event per tick: the same
+/// distance, less smooth, and the EMA sees one sample per tick instead of
+/// several.
+fn model_frames(
+    models: &mut HashMap<ScrollSource, LoWheelModel>,
     source: &ScrollSource,
     impulse: WheelDelta,
     at: Instant,
-    sensitivity: f64,
-) -> WheelDelta {
-    let y = if impulse.y == 0.0 {
-        0.0
+    speed_setting: f64,
+) -> [Option<ScrollFrame>; 2] {
+    let horizontal = (impulse.x != 0.0).then(|| {
+        ScrollFrame::new(
+            WheelDelta {
+                x: impulse.x,
+                y: 0.0,
+            },
+            openlogi_inject::SmoothScrollPhase::Changed,
+            false,
+        )
+    });
+    let vertical = if impulse.y == 0.0 {
+        None
     } else {
-        let raw_y = if sensitivity.abs() > f64::EPSILON {
-            impulse.y / sensitivity
-        } else {
-            impulse.y
-        };
-        let accel = accelerations.entry(source.clone()).or_default();
-        accel.accelerate(raw_y, at, sensitivity)
+        let model = models
+            .entry(source.clone())
+            .or_insert_with(|| LoWheelModel::new(speed_setting));
+        model.set_speed_setting(speed_setting);
+        let out = model.process(impulse.y, at);
+        trace!(
+            notches = impulse.y,
+            pixels = out.pixels,
+            gain = out.gain,
+            ema_ips = out.ema_ips,
+            "wheel model"
+        );
+        (out.pixels != 0).then(|| ScrollFrame::wheel_pixels(out.pixels, out.line_delta))
     };
-    WheelDelta { x: impulse.x, y }
+    [vertical, horizontal]
 }
 
 fn run_worker(
@@ -577,7 +606,7 @@ fn run_worker(
     emit_direct: &mut impl FnMut(WheelDelta),
 ) {
     let mut engine = ScrollEngine::default();
-    let mut accelerations = HashMap::<ScrollSource, super::WheelAcceleration>::new();
+    let mut models = HashMap::<ScrollSource, LoWheelModel>::new();
     let mut observed_smoothing = preferences.smooth_scroll_enabled();
     // An overflow-cancelled incarnation stays tombstoned so accepted input that
     // was already queued when control overtook the saturated queue is ignored.
@@ -595,16 +624,16 @@ fn run_worker(
                     if cancelled_generation > cancellations.generation
                         && cancellations.advance_to(shared_generation.load(Ordering::Acquire))
                     {
-                        accelerations.clear();
+                        models.clear();
                         engine.cancel_all(emit_smooth);
                     }
                     if cancellations.cancel(&session, cancelled_generation) {
-                        accelerations.remove(&ScrollSource::Hidpp(session.clone()));
+                        models.remove(&ScrollSource::Hidpp(session.clone()));
                         engine.cancel_source(&ScrollSource::Hidpp(session), emit_smooth);
                     }
                 }
                 ScrollControl::Shutdown(request) => {
-                    accelerations.clear();
+                    models.clear();
                     engine.cancel_all(emit_smooth);
                     let _ = request.done.send(());
                     return;
@@ -625,36 +654,31 @@ fn run_worker(
             // old generation and is rejected below, so its source tombstone
             // can no longer protect anything. A delayed old-generation control
             // is also ignored above instead of recreating it.
-            accelerations.clear();
+            models.clear();
             engine.cancel_all(emit_smooth);
         } else if toggled {
-            accelerations.clear();
+            models.clear();
             engine.cancel_all(emit_smooth);
         }
 
         match command {
             Ok(ScrollCommand::Input(input)) if cancellations.accepts(&input) => {
                 match input.output_under(smoothing) {
-                    ScrollOutputMode::Smooth { at } | ScrollOutputMode::Eased { at } => {
+                    ScrollOutputMode::Smooth { at } | ScrollOutputMode::MainWheel { at } => {
                         let is_main_wheel = matches!(
                             (&input.source, input.output),
                             (ScrollSource::OsHook(_), ScrollOutputMode::Smooth { .. })
-                                | (ScrollSource::Hidpp(_), ScrollOutputMode::Eased { .. })
+                                | (ScrollSource::Hidpp(_), ScrollOutputMode::MainWheel { .. })
                         );
                         if is_main_wheel {
-                            let sensitivity = preferences.vertical_sensitivity().scroll_multiplier();
-                            let accelerated = accelerate_impulse(
-                                &mut accelerations,
-                                &input.source,
-                                input.impulse,
-                                at,
-                                sensitivity,
-                            );
-                            emit_smooth(ScrollFrame::new(
-                                accelerated,
-                                openlogi_inject::SmoothScrollPhase::Changed,
-                                false,
-                            ));
+                            let speed = preferences.vertical_sensitivity().lo_speed_setting();
+                            for frame in
+                                model_frames(&mut models, &input.source, input.impulse, at, speed)
+                                    .into_iter()
+                                    .flatten()
+                            {
+                                emit_smooth(frame);
+                            }
                         } else {
                             engine.impulse(input.source, input.impulse, at, emit_smooth);
                         }
@@ -663,14 +687,26 @@ fn run_worker(
                         engine.phased_impulse(input.source, input.impulse, at, emit_smooth);
                     }
                     ScrollOutputMode::Direct => {
-                        accelerations.remove(&input.source);
+                        models.remove(&input.source);
                         engine.cancel_source(&input.source, emit_smooth);
-                        emit_direct(input.impulse);
+                        // Input queued unscaled under smoothing (the model
+                        // applies sensitivity itself) and reclassified here by
+                        // a toggle race still owes the plain multiplier; input
+                        // submitted as Direct arrives already scaled.
+                        let impulse = if matches!(input.output, ScrollOutputMode::Smooth { .. }) {
+                            let multiplier = preferences.vertical_sensitivity().scroll_multiplier();
+                            input.impulse.with_vertical_scale(multiplier)
+                        } else {
+                            Some(input.impulse)
+                        };
+                        if let Some(impulse) = impulse {
+                            emit_direct(impulse);
+                        }
                     }
                 }
             }
             Ok(ScrollCommand::CancelSource(source)) => {
-                accelerations.remove(&source);
+                models.remove(&source);
                 engine.cancel_source(&source, emit_smooth);
             }
             Ok(ScrollCommand::Input(_) | ScrollCommand::Wake) => {}
@@ -719,7 +755,6 @@ mod tests {
                 accepting: Arc::new(AtomicBool::new(true)),
                 preferences,
                 disturbance: Arc::new(Mutex::new(WheelDisturbanceFilter::default())),
-                session_debouncers: Arc::new(Mutex::new(HashMap::new())),
             },
             receiver,
             control_rx,
@@ -762,12 +797,16 @@ mod tests {
     }
 
     #[test]
-    fn hook_scales_vertical_distance_before_smoothing() {
+    fn hook_forwards_raw_ticks_to_the_wheel_model_when_smoothing() {
         let (input, receiver, _controls) = standalone_input(1, preferences(true, 7));
         assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(2.0, 2.0)));
 
         let queued = queued_input(&receiver);
-        assert_eq!(queued.impulse, WheelDelta { x: 2.0, y: 1.0 });
+        assert_eq!(
+            queued.impulse,
+            WheelDelta { x: 2.0, y: 2.0 },
+            "the model applies sensitivity as its speed setting; no pre-scaling"
+        );
         assert!(matches!(queued.output, ScrollOutputMode::Smooth { .. }));
     }
 
@@ -801,11 +840,11 @@ mod tests {
         assert!(matches!(queued.output, ScrollOutputMode::Phased { .. }));
     }
 
-    /// The device's own switch diverted the wheel to ease it, so its input
-    /// eases and takes the main-wheel sensitivity under either app-wide
-    /// smoothing setting, at submission and after a toggle while queued.
+    /// The device's own switch diverted the wheel, so its input runs through
+    /// the wheel model, unscaled, under either app-wide smoothing setting, at
+    /// submission and after a toggle while queued.
     #[test]
-    fn a_diverted_main_wheel_is_eased_and_scaled_whatever_the_app_setting() {
+    fn a_diverted_main_wheel_takes_the_model_whatever_the_app_setting() {
         for smoothing in [false, true] {
             let (input, receiver, _controls) = standalone_input(1, preferences(smoothing, 7));
             let session = HidppSessionId::with_epoch("mouse-a", 7);
@@ -814,12 +853,12 @@ mod tests {
                 Ok(())
             );
             let queued = queued_input(&receiver);
-            assert_eq!(queued.impulse, WheelDelta { x: 0.0, y: 1.0 });
+            assert_eq!(queued.impulse, WheelDelta { x: 0.0, y: 2.0 });
             for dequeued_under in [false, true] {
                 assert!(
                     matches!(
                         queued.output_under(dequeued_under),
-                        ScrollOutputMode::Eased { .. }
+                        ScrollOutputMode::MainWheel { .. }
                     ),
                     "queued with smoothing {smoothing}, dequeued with {dequeued_under}"
                 );
@@ -827,8 +866,8 @@ mod tests {
         }
     }
 
-    /// What the runtime cannot ease comes back as given; what it cannot
-    /// queue comes back scaled, so the caller's direct injection scrolls as
+    /// What the runtime cannot take comes back as given; what it cannot
+    /// queue comes back scaled by the plain multiplier, so the caller's direct injection scrolls as
     /// far as the eased output would have.
     #[test]
     fn a_diverted_main_wheel_hands_back_what_it_cannot_take() {
@@ -1220,7 +1259,11 @@ mod tests {
         preferences.publish(true, sensitivity(28));
         assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 1.0)));
         let queued = queued_input(&receiver);
-        assert_eq!(queued.impulse, WheelDelta { x: 0.0, y: 2.0 });
+        assert_eq!(
+            queued.impulse,
+            WheelDelta { x: 0.0, y: 1.0 },
+            "smoothing hands the raw tick to the model"
+        );
         assert!(matches!(queued.output, ScrollOutputMode::Smooth { .. }));
     }
 
@@ -1547,7 +1590,7 @@ mod tests {
     }
 
     #[test]
-    fn main_wheel_dispatches_immediate_frame_without_deferral() {
+    fn main_wheel_dispatches_one_immediate_model_frame_per_report() {
         let (frames, received) = mpsc::channel();
         let mut runtime = ScrollRuntime::spawn_with(
             preferences(true, 14),
@@ -1567,43 +1610,36 @@ mod tests {
             .expect("immediate dispatch on first tick");
         assert_eq!(frame.phase, openlogi_inject::SmoothScrollPhase::Changed);
         assert!(!frame.phased);
-        assert_eq!(frame.delta.y, 1.0);
+        // One notch = 15 steps = 100 / 7.714 = 12.96 px at gain 1, truncated;
+        // 12 px also flush one line (1.2).
+        assert_eq!(frame.delta, WheelDelta { x: 0.0, y: 12.0 });
+        assert_eq!(frame.wheel_lines, Some(1.2));
 
-        // No subsequent delayed animation frames are emitted
         assert!(
             received.recv_timeout(Duration::from_millis(50)).is_err(),
-            "immediate dispatch must not queue delayed animation frames"
+            "one report is exactly one event: no timer, easing or momentum"
         );
         runtime.shutdown();
     }
 
     #[test]
-    fn hidpp_session_debouncer_absorbs_rebound() {
+    fn hidpp_wheel_scroll_leaves_reversal_hysteresis_to_the_model() {
         let (input, receiver, _controls) = standalone_input(10, preferences(true, 14));
         let session = HidppSessionId::with_epoch("mouse-a", 1);
 
-        // Initial scroll down
         assert_eq!(
             input.try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, 1.0)),
             Ok(())
         );
-        let first = queued_input(&receiver);
-        assert!(first.impulse.y > 0.0);
+        assert!(queued_input(&receiver).impulse.y > 0.0);
 
-        // Rebound tick is absorbed
+        // A half-notch reversal is queued whole: the model, which sees it in
+        // hi-res steps, applies the reference's one-step dead band.
         assert_eq!(
             input.try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, -0.5)),
             Ok(())
         );
-        assert!(receiver.try_recv().is_err());
-
-        // Subsequent intentional scroll down continues
-        assert_eq!(
-            input.try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, 1.0)),
-            Ok(())
-        );
-        let second = queued_input(&receiver);
-        assert!(second.impulse.y > 0.0);
+        assert!(queued_input(&receiver).impulse.y < 0.0);
     }
 
     #[test]
@@ -1646,109 +1682,242 @@ mod tests {
         assert!(receiver.try_recv().is_err());
     }
 
-    #[test]
-    fn worker_accelerate_impulse_preserves_slow_single_notch() {
-        let mut accels = HashMap::new();
-        let source = ScrollSource::current_hook();
-        let now = Instant::now();
+    fn frames_for(
+        models: &mut HashMap<ScrollSource, LoWheelModel>,
+        impulse: WheelDelta,
+        at: Instant,
+        speed: f64,
+    ) -> Vec<ScrollFrame> {
+        model_frames(models, &ScrollSource::current_hook(), impulse, at, speed)
+            .into_iter()
+            .flatten()
+            .collect()
+    }
 
-        // Single tick at sensitivity 1.0 (multiplier 1.0)
-        let impulse = WheelDelta { x: 0.0, y: 1.0 };
-        let out = accelerate_impulse(&mut accels, &source, impulse, now, 1.0);
-        assert_eq!(out, WheelDelta { x: 0.0, y: 1.0 });
+    fn pixels(frames: &[ScrollFrame]) -> i32 {
+        #[expect(clippy::cast_possible_truncation, reason = "test pixels are small")]
+        frames.iter().map(|frame| frame.delta.y as i32).sum()
+    }
 
-        // Sensitivity 2.0 scales queued impulse to y=2.0; accelerate_impulse normalizes back to raw 1.0
-        let mut accels2 = HashMap::new();
-        let impulse2 = WheelDelta { x: 0.0, y: 2.0 };
-        let out2 = accelerate_impulse(&mut accels2, &source, impulse2, now, 2.0);
-        assert_eq!(out2, WheelDelta { x: 0.0, y: 1.0 });
+    fn tick(y: f64) -> WheelDelta {
+        WheelDelta { x: 0.0, y }
     }
 
     #[test]
-    fn worker_accelerate_impulse_ramps_up_on_rapid_ticks() {
-        let mut accels = HashMap::new();
-        let source = ScrollSource::current_hook();
-        let now = Instant::now();
-
-        let impulse = WheelDelta { x: 0.0, y: 1.0 };
-        let out1 = accelerate_impulse(&mut accels, &source, impulse, now, 1.0);
-        assert_eq!(out1.y, 1.0);
-
-        // Subsequent rapid tick 15ms later
-        let out2 = accelerate_impulse(
-            &mut accels,
-            &source,
-            impulse,
-            now + Duration::from_millis(15),
-            1.0,
+    fn model_carries_the_pixel_remainder_across_reports() {
+        let mut models = HashMap::new();
+        let t0 = Instant::now();
+        let mut total = 0;
+        for i in 0..10u64 {
+            // 200 ms apart keeps the gain at 1: 12.963 px per notch.
+            let frames = frames_for(
+                &mut models,
+                tick(1.0),
+                t0 + Duration::from_millis(200 * i),
+                0.0,
+            );
+            assert_eq!(frames.len(), 1);
+            assert!(frames[0].wheel_lines.is_some());
+            total += pixels(&frames);
+        }
+        assert_eq!(
+            total, 129,
+            "10 x 12.963 = 129.6 truncated, never rounded per event"
         );
-        assert!(out2.y > 1.0, "expected acceleration gain > 1.0, got {}", out2.y);
-
-        // Third rapid tick increases velocity further
-        let out3 = accelerate_impulse(
-            &mut accels,
-            &source,
-            impulse,
-            now + Duration::from_millis(30),
-            1.0,
-        );
-        assert!(out3.y > out2.y, "expected increasing acceleration gain, got {}", out3.y);
     }
 
     #[test]
-    fn worker_main_wheel_accelerates_while_thumb_wheel_passes_unaccelerated() {
-        let (input, commands, controls) = standalone_input(10, preferences(true, 14));
+    fn model_state_resets_after_a_gap_and_speed_setting_changes_the_burst() {
+        let burst = |speed: f64| {
+            let mut models = HashMap::new();
+            let t0 = Instant::now();
+            let mut last = 0;
+            for i in 0..40u64 {
+                let frames = frames_for(
+                    &mut models,
+                    tick(0.2),
+                    t0 + Duration::from_millis(10 * i),
+                    speed,
+                );
+                last = pixels(&frames);
+            }
+            (models, t0 + Duration::from_millis(390), last)
+        };
+        let (mut models, end, fast) = burst(0.0);
+        assert!(fast > 8, "the EMA gain ramps up in a flick, got {fast}");
+        let (_, _, slower) = burst(-1.0);
+        let (_, _, quicker) = burst(1.0);
+        assert!(
+            slower < fast && fast < quicker,
+            "{slower} < {fast} < {quicker}"
+        );
+
+        // A 100 ms+ gap drops the velocity history: a lone notch is gain 1.
+        let after_gap = pixels(&frames_for(
+            &mut models,
+            tick(1.0),
+            end + Duration::from_millis(200),
+            0.0,
+        ));
+        // Only the velocity history resets; the sub-pixel remainder carries.
+        assert!((12..=13).contains(&after_gap), "{after_gap}");
+    }
+
+    #[test]
+    fn sensitivity_is_not_applied_on_top_of_the_model() {
+        for raw in [1u8, 14, 28, 100] {
+            let mut models = HashMap::new();
+            let speed = sensitivity(raw).lo_speed_setting();
+            let frames = frames_for(&mut models, tick(1.0), Instant::now(), speed);
+            assert_eq!(
+                pixels(&frames),
+                12,
+                "sensitivity {raw}: gain 1, no 13 pt/tick, no extra scale"
+            );
+        }
+    }
+
+    #[test]
+    fn model_input_is_signed_per_report() {
+        let mut models = HashMap::new();
+        assert_eq!(
+            pixels(&frames_for(&mut models, tick(-1.0), Instant::now(), 0.0)),
+            -12
+        );
+    }
+
+    /// A report smaller than one hi-res step of a 15-step wheel (or of any
+    /// other multiplier) keeps its fraction instead of being rounded away.
+    #[test]
+    fn sub_step_reports_accumulate_instead_of_vanishing() {
+        let mut models = HashMap::new();
+        let t0 = Instant::now();
+        let mut total = 0;
+        for i in 0..100u64 {
+            // 100 x 0.01 notch, 200 ms apart (gain 1): one notch, 12.96 px.
+            total += pixels(&frames_for(
+                &mut models,
+                tick(0.01),
+                t0 + Duration::from_millis(200 * i),
+                0.0,
+            ));
+        }
+        assert_eq!(total, 12);
+    }
+
+    #[test]
+    fn wheel_multiplier_does_not_change_the_distance_of_a_notch() {
+        // 3 steps of a 6-step wheel and 7.5 steps of a 15-step wheel are the
+        // same half notch; the diverted path hands over `steps / per_notch`.
+        let half_notch_of = |steps: f64, per_notch: f64| {
+            let mut models = HashMap::new();
+            pixels(&frames_for(
+                &mut models,
+                tick(steps / per_notch),
+                Instant::now(),
+                0.0,
+            ))
+        };
+        assert_eq!(half_notch_of(3.0, 6.0), half_notch_of(7.5, 15.0));
+        assert_eq!(half_notch_of(3.0, 6.0), 6);
+    }
+
+    #[test]
+    fn unscaled_input_reclassified_to_direct_by_a_toggle_race_gets_the_multiplier() {
+        let preferences = preferences(true, 28);
+        let (input, commands, controls) = standalone_input(2, Arc::clone(&preferences));
         let generation = Arc::clone(&input.generation);
-        let preferences = Arc::clone(&input.preferences);
-
-        // Send two rapid main wheel ticks to retarget active motion and emit a frame
-        assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 1.0)));
-        assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 1.0)));
+        assert!(input.try_hook_scroll(ScrollDelta::wheel_ticks(0.0, 4.0)));
+        // Smoothing goes off after the unscaled tick was queued.
+        preferences.publish(false, sensitivity(28));
         drop(input);
 
-        let mut frames = Vec::new();
         let mut direct = Vec::new();
         run_worker(
             |deadline| receive_command(&commands, deadline),
             &controls,
             &generation,
             &preferences,
-            &mut |frame| frames.push(frame),
-            &mut |delta| direct.push(delta),
+            &mut |_| {},
+            &mut |impulse| direct.push(impulse),
         );
-
-        assert!(!frames.is_empty(), "expected retargeted smooth frame from rapid ticks");
-        assert!(direct.is_empty());
+        assert_eq!(direct, vec![WheelDelta { x: 0.0, y: 8.0 }]);
     }
 
     #[test]
-    fn worker_cancellation_cleans_up_acceleration_state() {
-        let mut accels = HashMap::new();
-        let source = ScrollSource::current_hook();
-        let now = Instant::now();
-        let impulse = WheelDelta { x: 0.0, y: 1.0 };
-
-        accelerate_impulse(&mut accels, &source, impulse, now, 1.0);
-        let accelerated = accelerate_impulse(
-            &mut accels,
-            &source,
-            impulse,
-            now + Duration::from_millis(15),
-            1.0,
+    fn horizontal_ticks_skip_the_model() {
+        let mut models = HashMap::new();
+        let frames = frames_for(
+            &mut models,
+            WheelDelta { x: 2.0, y: 0.0 },
+            Instant::now(),
+            0.0,
         );
-        assert!(accelerated.y > 1.0);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].delta, WheelDelta { x: 2.0, y: 0.0 });
+        assert_eq!(frames[0].wheel_lines, None);
+        assert!(models.is_empty());
+    }
 
-        // Clean up source on cancellation
-        accels.remove(&source);
-
-        // Next tick starts fresh after cleanup
-        let fresh = accelerate_impulse(
-            &mut accels,
-            &source,
-            impulse,
-            now + Duration::from_millis(20),
-            1.0,
+    #[test]
+    fn thumb_wheel_stays_on_the_easing_engine() {
+        let (frames, received) = mpsc::channel();
+        let mut runtime = ScrollRuntime::spawn_with(
+            preferences(true, 14),
+            move |frame| {
+                frames
+                    .send(frame)
+                    .expect("test frame receiver remains open");
+            },
+            |_| {},
+        )
+        .expect("spawn scroll worker");
+        let session = HidppSessionId::with_epoch("mouse-a", 1);
+        assert!(
+            runtime
+                .input()
+                .try_hidpp_scroll(&session, ScrollDelta::wheel_ticks(1.0, 0.0))
         );
-        assert_eq!(fresh.y, 1.0);
+        let first = received
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first animation frame");
+        assert_eq!(first.wheel_lines, None);
+        assert_eq!(first.phase, openlogi_inject::SmoothScrollPhase::Began);
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn worker_models_are_per_source_and_dropped_on_cancel() {
+        let (input, commands, controls) = standalone_input(10, preferences(true, 14));
+        let generation = Arc::clone(&input.generation);
+        let preferences = Arc::clone(&input.preferences);
+        let session = HidppSessionId::with_epoch("mouse-a", 1);
+        // Two notches back to back, then a cancel and a third: the third starts
+        // fresh, so it matches a first report (12 px, remainder dropped too).
+        for _ in 0..2 {
+            assert_eq!(
+                input.try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, 1.0)),
+                Ok(())
+            );
+        }
+        input.cancel_hidpp_session(&session);
+        assert_eq!(
+            input.try_hidpp_wheel_scroll(&session, ScrollDelta::wheel_ticks(0.0, 1.0)),
+            Ok(())
+        );
+        drop(input);
+
+        let mut frames = Vec::new();
+        run_worker(
+            |deadline| receive_command(&commands, deadline),
+            &controls,
+            &generation,
+            &preferences,
+            &mut |frame| frames.push(frame),
+            &mut |_| {},
+        );
+        let y: Vec<f64> = frames.iter().map(|frame| frame.delta.y).collect();
+        assert_eq!(y.len(), 3, "{y:?}");
+        assert_eq!(y[2], 12.0);
     }
 }

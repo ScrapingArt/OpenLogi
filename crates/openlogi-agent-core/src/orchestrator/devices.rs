@@ -21,8 +21,10 @@ use crate::watchers::host_switch::HostSwitchLink;
 /// that is not configured, is left out of the change and keeps the device's
 /// current value; `None` when that leaves nothing to write, and while the
 /// device's capture session owns the wheel ([`main_wheel_divert`]): that
-/// session writes the same settings along with its divert, and a write from
-/// here would hand the wheel back to native reporting under it.
+/// session writes the inversion along with its divert, and a write from here
+/// would hand the wheel back to native reporting under it. The saved
+/// resolution is applied by this write once the wheel is handed back; the
+/// session restores the resolution it found.
 pub(super) fn configured_wheel_mode(
     config: &Config,
     dev: &AgentDevice,
@@ -36,8 +38,8 @@ pub(super) fn configured_wheel_mode(
 }
 
 /// The main-wheel divert `dev`'s capture session arms for smooth scrolling,
-/// carrying the wheel settings [`configured_wheel_mode`] would otherwise
-/// write; `None` leaves the wheel native.
+/// carrying the configured inversion and a high-resolution request for the
+/// diverted reports; `None` leaves the wheel native.
 ///
 /// Diverting needs the device's opt-in, its `0x2121` wheel, and an agent that
 /// may post the scrolling in the wheel's place: the mouse hook running (on
@@ -56,9 +58,12 @@ pub(super) fn main_wheel_divert(
     if !wanted {
         return None;
     }
-    let (resolution, inverted) = wheel_settings(config, dev)?;
+    let (_, inverted) = wheel_settings(config, dev)?;
+    // The smooth-scroll model consumes finer-than-notch reports, as Options+
+    // does (`high_resolution=1`). The session restores the wheel's own
+    // resolution on hand-back, so a saved one is untouched.
     Some(MainWheelDivert {
-        resolution,
+        resolution: Some(ScrollResolution::High),
         inverted,
     })
 }

@@ -1,20 +1,21 @@
 //! Traditional wheel output owned by one dedicated worker.
 //!
 //! Hook callbacks submit typed wheel impulses through [`ScrollInputHandle`]
-//! without blocking. The worker either scales and emits them directly,
-//! evaluates finite smooth motion from absolute timestamps, or, with smoothing
-//! off, wraps a diverted horizontal wheel in a phased gesture. Pixel-precise
+//! without blocking. The main wheel (hook ticks with smoothing on, or a
+//! diverted HID++ wheel) goes through `lo_model::LoWheelModel`, a port of the
+//! Logi Options+ pipeline: every report becomes exactly one immediate,
+//! phaseless pixel event, shaped only by an EMA-driven gain; there is no
+//! timer, easing or momentum. Other output is scaled and emitted directly,
+//! eased by the `ScrollEngine` (thumb wheel), or, with smoothing off, a
+//! diverted horizontal wheel is wrapped in a phased gesture. Pixel-precise
 //! input never enters this runtime, so native trackpad and continuous wheel
 //! streams cannot be mixed with wheel ticks.
 
-mod acceleration;
 mod debounce;
+mod lo_model;
 mod worker;
 
-pub use acceleration::WheelAcceleration;
-pub use debounce::{
-    WheelDebouncer, WheelDisturbanceFilter, WheelFluidity, WheelHysteresis,
-};
+pub use debounce::{WheelDebouncer, WheelDisturbanceFilter, WheelFluidity, WheelHysteresis};
 pub use worker::{ScrollInputHandle, ScrollPreferences, ScrollRuntime};
 
 use std::collections::HashMap;
@@ -105,13 +106,24 @@ impl From<WheelDelta> for ScrollDelta {
 }
 
 /// One output frame from the pure motion model.
+///
+/// Two kinds share the struct. An eased or phased frame has `wheel_lines ==
+/// None` and is posted from `delta`, `phase` and `phased`. A main-wheel frame
+/// (built only by [`Self::wheel_pixels`]) has `wheel_lines == Some(_)`,
+/// `phase == Changed`, `phased == false`, `delta.x == 0` and `delta.y` holding
+/// whole pixels; [`Self::post`] posts it from `delta.y` and the lines alone.
+/// Keep the constructors the only way to build either kind.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ScrollFrame {
+    /// Wheel ticks; for a [`Self::wheel_pixels`] frame, integer pixels.
     delta: WheelDelta,
     phase: SmoothScrollPhase,
     /// The frame belongs to a phased gesture whose phases the application
     /// must see, rather than to smoothed wheel output.
     phased: bool,
+    /// Main-wheel output of the Options+ model: `delta.y` already holds its
+    /// pixels, and this is the accumulated line delta posted beside them.
+    wheel_lines: Option<f64>,
 }
 
 impl ScrollFrame {
@@ -120,11 +132,29 @@ impl ScrollFrame {
             delta,
             phase,
             phased,
+            wheel_lines: None,
+        }
+    }
+
+    /// One main-wheel event from the Options+ model: whole pixels plus the
+    /// line delta, posted as is.
+    fn wheel_pixels(pixels: i32, line_delta: f64) -> Self {
+        Self {
+            delta: WheelDelta {
+                x: 0.0,
+                y: f64::from(pixels),
+            },
+            phase: SmoothScrollPhase::Changed,
+            phased: false,
+            wheel_lines: Some(line_delta),
         }
     }
 
     fn post(self) {
-        if self.phased {
+        if let Some(lines) = self.wheel_lines {
+            #[expect(clippy::cast_possible_truncation, reason = "built from an i32")]
+            openlogi_inject::post_wheel_pixels(self.delta.y as i32, lines);
+        } else if self.phased {
             openlogi_inject::post_phased_scroll(self.delta.into(), self.phase);
         } else {
             openlogi_inject::post_smooth_scroll(self.delta.into(), self.phase);
