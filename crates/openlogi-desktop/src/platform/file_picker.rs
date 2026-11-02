@@ -85,10 +85,8 @@ pub fn prompt_for_application_or_folder(cx: &App) -> Receiver<Option<PathBuf>> {
             } else {
                 None
             };
-            if let Ok(mut guard) = tx.lock() {
-                if let Some(sender) = guard.take() {
-                    let _ = sender.send(path);
-                }
+            if let Some(sender) = tx.lock().ok().and_then(|mut g| g.take()) {
+                let _ = sender.send(path);
             }
         });
         panel.beginWithCompletionHandler(&handler);
@@ -126,7 +124,9 @@ mod tests {
     #[test]
     #[ignore = "AppKit NSOpenPanel requires the main thread; cargo test runs on worker threads"]
     fn configure_open_panel_mac() {
-        let mtm = MainThreadMarker::new().expect("MainThreadMarker required");
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
         let panel = configure_open_panel(mtm);
         assert!(panel.canChooseDirectories());
         assert!(panel.canChooseFiles());

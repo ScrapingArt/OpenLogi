@@ -615,11 +615,15 @@ mod tests {
         // 1. Cancelling prompt keeps existing input
         cx.update(|window, cx| {
             let input = view.read(cx).input.clone();
-            input.update(cx, |input, cx| input.set_value("/Applications/Notes.app", window, cx));
+            input.update(cx, |input, cx| {
+                input.set_value("/Applications/Notes.app", window, cx)
+            });
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
 
-        let bounds = cx.debug_bounds("ring-browse-path").expect("ring-browse-path exists");
+        let bounds = cx
+            .debug_bounds("ring-browse-path")
+            .expect("ring-browse-path exists");
         cx.simulate_click(bounds.center(), gpui::Modifiers::default());
         assert!(cx.did_prompt_for_paths());
         cx.simulate_path_prompt_response(|options| {
@@ -636,14 +640,18 @@ mod tests {
         });
 
         // 2. Selecting a path updates input text and commits action
-        let bounds = cx.debug_bounds("ring-browse-path").expect("ring-browse-path exists");
+        let bounds = cx
+            .debug_bounds("ring-browse-path")
+            .expect("ring-browse-path exists");
         cx.simulate_click(bounds.center(), gpui::Modifiers::default());
         assert!(cx.did_prompt_for_paths());
         cx.simulate_path_prompt_response(|options| {
             assert!(options.files);
             assert!(options.directories);
             assert!(!options.multiple);
-            Some(vec![std::path::PathBuf::from("/Applications/Calculator.app")])
+            Some(vec![std::path::PathBuf::from(
+                "/Applications/Calculator.app",
+            )])
         });
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -654,7 +662,10 @@ mod tests {
         cx.update(|_, cx| {
             let state = AppState::try_read(cx).unwrap();
             let layout = state.current_action_ring_layout();
-            let entry = layout.slots.get(&ActionRingSlot::Top).expect("slot Top must be set");
+            let entry = layout
+                .slots
+                .get(&ActionRingSlot::Top)
+                .expect("slot Top must be set");
             let Action::OpenApplication(target) = entry.action() else {
                 panic!("action must be OpenApplication");
             };
