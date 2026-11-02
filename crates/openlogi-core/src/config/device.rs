@@ -443,6 +443,42 @@ impl DeviceConfig {
         stripped.links = BTreeMap::new();
         stripped != Self::default()
     }
+
+    /// Reconcile all button bindings, disabled gestures, and per-app bindings
+    /// referencing `old` setup name to `new`.
+    pub fn rename_setup_references(&mut self, old: &str, new: &str) {
+        for binding in self.bindings.values_mut() {
+            binding.rename_setup_references(old, new);
+        }
+        for map in self.disabled_gestures.values_mut() {
+            for action in map.values_mut() {
+                action.rename_setup(old, new);
+            }
+        }
+        for app_bindings in self.per_app_bindings.values_mut() {
+            for action in app_bindings.values_mut() {
+                action.rename_setup(old, new);
+            }
+        }
+    }
+
+    /// Reset all button bindings, disabled gestures, and per-app bindings
+    /// referencing `setup` back to the default setup (`Action::ShowActionsRing(None)`).
+    pub fn delete_setup_references(&mut self, setup: &str) {
+        for binding in self.bindings.values_mut() {
+            binding.delete_setup_references(setup);
+        }
+        for map in self.disabled_gestures.values_mut() {
+            for action in map.values_mut() {
+                action.delete_setup(setup);
+            }
+        }
+        for app_bindings in self.per_app_bindings.values_mut() {
+            for action in app_bindings.values_mut() {
+                action.delete_setup(setup);
+            }
+        }
+    }
 }
 
 impl Default for DeviceConfig {
@@ -729,5 +765,110 @@ mod tests {
         let round_trip: DeviceConfig = toml::from_str(&toml::to_string(&configured)?)?;
         assert_eq!(round_trip.disabled_keys, configured.disabled_keys);
         Ok(())
+    }
+
+    #[test]
+    fn device_config_setup_reference_reconciliation() {
+        use std::collections::BTreeMap;
+        use crate::binding::{
+            Action, Binding, ButtonId, GestureDirection, LongPressBinding, MultiClickBinding,
+            WheelHoldBinding,
+        };
+
+        let mut config = DeviceConfig::default();
+        config.bindings.insert(
+            ButtonId::HapticPanel,
+            Binding::Single(Action::ShowActionsRing(Some("Gaming".into()))),
+        );
+        config.bindings.insert(
+            ButtonId::MiddleClick,
+            Binding::Single(Action::ShowActionsRing(Some("Media".into()))),
+        );
+        config.bindings.insert(
+            ButtonId::GestureButton,
+            Binding::Gesture(BTreeMap::from([
+                (
+                    GestureDirection::Click,
+                    Action::ShowActionsRing(Some("Gaming".into())),
+                ),
+                (GestureDirection::Up, Action::ShowActionsRing(None)),
+            ])),
+        );
+        config.bindings.insert(
+            ButtonId::Back,
+            Binding::LongPress(LongPressBinding::new(
+                Action::Copy,
+                Action::ShowActionsRing(Some("Gaming".into())),
+            )),
+        );
+        config.bindings.insert(
+            ButtonId::Forward,
+            Binding::WheelHold(WheelHoldBinding::horizontal_scroll(Action::ShowActionsRing(
+                Some("Gaming".into()),
+            ))),
+        );
+        config.bindings.insert(
+            ButtonId::RightClick,
+            Binding::MultiClick(MultiClickBinding::new(
+                Action::RightClick,
+                Action::ShowActionsRing(Some("Gaming".into())),
+            )),
+        );
+
+        config.disabled_gestures.insert(
+            ButtonId::GestureButton,
+            BTreeMap::from([(
+                GestureDirection::Click,
+                Action::ShowActionsRing(Some("Gaming".into())),
+            )]),
+        );
+
+        config.per_app_bindings.insert(
+            "com.apple.Safari".into(),
+            BTreeMap::from([(
+                ButtonId::HapticPanel,
+                Action::ShowActionsRing(Some("Gaming".into())),
+            )]),
+        );
+
+        // Rename "Gaming" -> "Competitive"
+        config.rename_setup_references("Gaming", "Competitive");
+
+        assert_eq!(
+            config.bindings[&ButtonId::HapticPanel],
+            Binding::Single(Action::ShowActionsRing(Some("Competitive".into())))
+        );
+        assert_eq!(
+            config.bindings[&ButtonId::MiddleClick],
+            Binding::Single(Action::ShowActionsRing(Some("Media".into())))
+        );
+        assert_eq!(
+            config.disabled_gestures[&ButtonId::GestureButton][&GestureDirection::Click],
+            Action::ShowActionsRing(Some("Competitive".into()))
+        );
+        assert_eq!(
+            config.per_app_bindings["com.apple.Safari"][&ButtonId::HapticPanel],
+            Action::ShowActionsRing(Some("Competitive".into()))
+        );
+
+        // Delete "Competitive" -> reverts to ShowActionsRing(None)
+        config.delete_setup_references("Competitive");
+
+        assert_eq!(
+            config.bindings[&ButtonId::HapticPanel],
+            Binding::Single(Action::ShowActionsRing(None))
+        );
+        assert_eq!(
+            config.bindings[&ButtonId::MiddleClick],
+            Binding::Single(Action::ShowActionsRing(Some("Media".into())))
+        );
+        assert_eq!(
+            config.disabled_gestures[&ButtonId::GestureButton][&GestureDirection::Click],
+            Action::ShowActionsRing(None)
+        );
+        assert_eq!(
+            config.per_app_bindings["com.apple.Safari"][&ButtonId::HapticPanel],
+            Action::ShowActionsRing(None)
+        );
     }
 }

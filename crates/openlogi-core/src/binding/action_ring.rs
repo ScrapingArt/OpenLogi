@@ -145,7 +145,7 @@ impl RingAction {
 fn validate_ring_action(action: &Action) -> Result<(), RingActionError> {
     match action {
         Action::None => Err(RingActionError::EmptyAction),
-        Action::ShowActionsRing => Err(RingActionError::RecursiveTrigger),
+        Action::ShowActionsRing(_) => Err(RingActionError::RecursiveTrigger),
         _ => Ok(()),
     }
 }
@@ -287,6 +287,57 @@ impl Default for ActionRingLayout {
     }
 }
 
+/// The reserved name for the built-in primary Actions Ring setup.
+pub const DEFAULT_SETUP_NAME: &str = "Default";
+
+/// A named Actions Ring setup, containing a default layout and optional per-application layout overrides.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActionRingSetup {
+    /// Default layout used when the foreground application has no override.
+    #[serde(default)]
+    pub default: ActionRingLayout,
+    /// Complete layout overrides keyed by foreground application identifier.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub per_app: BTreeMap<String, ActionRingLayout>,
+}
+
+impl ActionRingSetup {
+    /// Resolve the complete layout for the foreground application in this setup.
+    #[must_use]
+    pub fn effective_layout(&self, aliases: &AppAliases, app_id: Option<&str>) -> ActionRingLayout {
+        app_id
+            .and_then(|app| overlay_for(&self.per_app, aliases, app))
+            .cloned()
+            .unwrap_or_else(|| self.default.clone())
+    }
+
+    /// The layout saved under `key` in this setup, or the setup's default layout.
+    #[must_use]
+    pub fn profile_layout(&self, key: Option<&str>) -> ActionRingLayout {
+        key.and_then(|k| self.per_app.get(k))
+            .cloned()
+            .unwrap_or_else(|| self.default.clone())
+    }
+}
+
+/// Why an Actions Ring setup operation failed.
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum ActionRingSetupError {
+    /// The default setup cannot be renamed or deleted.
+    #[error("cannot rename or delete the Default setup")]
+    DefaultSetupReserved,
+    /// A setup name cannot be empty or whitespace only.
+    #[error("setup name cannot be empty")]
+    EmptyName,
+    /// A setup with this name already exists on the device.
+    #[error("a setup named '{0}' already exists")]
+    AlreadyExists(String),
+    /// The specified setup was not found on the device.
+    #[error("setup '{0}' not found")]
+    NotFound(String),
+}
+
 /// Per-device Actions Ring settings and application-specific layouts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -303,6 +354,9 @@ pub struct ActionRingConfig {
     /// Complete layout overrides keyed by foreground application identifier.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub per_app: BTreeMap<String, ActionRingLayout>,
+    /// Additional named setups for this device.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub setups: BTreeMap<String, ActionRingSetup>,
 }
 
 impl Default for ActionRingConfig {
@@ -312,6 +366,7 @@ impl Default for ActionRingConfig {
             haptics: true,
             default: ActionRingLayout::default(),
             per_app: BTreeMap::new(),
+            setups: BTreeMap::new(),
         }
     }
 }
@@ -356,6 +411,148 @@ impl ActionRingConfig {
             .cloned()
             .unwrap_or_else(|| self.default.clone())
     }
+
+    /// All available setup names, starting with [`DEFAULT_SETUP_NAME`] followed by custom setups in sorted order.
+    #[must_use]
+    pub fn setup_names(&self) -> Vec<&str> {
+        let mut names = Vec::with_capacity(1 + self.setups.len());
+        names.push(DEFAULT_SETUP_NAME);
+        names.extend(self.setups.keys().map(String::as_str));
+        names
+    }
+
+    /// Access a custom setup by name, or `None` if `name` is `None`, `"Default"`, or not found.
+    #[must_use]
+    pub fn setup(&self, name: Option<&str>) -> Option<&ActionRingSetup> {
+        match name {
+            Some(name) if name != DEFAULT_SETUP_NAME => self.setups.get(name),
+            _ => None,
+        }
+    }
+
+    /// Mutably access a custom setup by name, or `None` if `name` is `None`, `"Default"`, or not found.
+    pub fn setup_mut(&mut self, name: Option<&str>) -> Option<&mut ActionRingSetup> {
+        match name {
+            Some(name) if name != DEFAULT_SETUP_NAME => self.setups.get_mut(name),
+            _ => None,
+        }
+    }
+
+    /// Resolve the complete layout for a specific setup and foreground application.
+    /// Falls back to the default setup layout if `setup` is `None`, `"Default"`, or nonexistent.
+    #[must_use]
+    pub fn effective_layout_for(
+        &self,
+        setup: Option<&str>,
+        aliases: &AppAliases,
+        app_id: Option<&str>,
+    ) -> ActionRingLayout {
+        if let Some(custom) = self.setup(setup) {
+            custom.effective_layout(aliases, app_id)
+        } else {
+            self.effective_layout(aliases, app_id)
+        }
+    }
+
+    /// Resolve the profile layout for a specific setup and profile key.
+    /// Falls back to the default setup layout if `setup` is `None`, `"Default"`, or nonexistent.
+    #[must_use]
+    pub fn profile_layout_for(&self, setup: Option<&str>, key: Option<&str>) -> ActionRingLayout {
+        if let Some(custom) = self.setup(setup) {
+            custom.profile_layout(key)
+        } else {
+            self.profile_layout(key)
+        }
+    }
+
+    /// Create a new custom setup with default slots and no app overrides.
+    pub fn create_setup(&mut self, name: &str) -> Result<(), ActionRingSetupError> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err(ActionRingSetupError::EmptyName);
+        }
+        if trimmed == DEFAULT_SETUP_NAME {
+            return Err(ActionRingSetupError::DefaultSetupReserved);
+        }
+        if self.setups.contains_key(trimmed) {
+            return Err(ActionRingSetupError::AlreadyExists(trimmed.to_string()));
+        }
+        self.setups.insert(trimmed.to_string(), ActionRingSetup::default());
+        Ok(())
+    }
+
+    /// Rename an existing custom setup.
+    pub fn rename_setup(&mut self, old: &str, new: &str) -> Result<(), ActionRingSetupError> {
+        if old == DEFAULT_SETUP_NAME {
+            return Err(ActionRingSetupError::DefaultSetupReserved);
+        }
+        let trimmed_new = new.trim();
+        if trimmed_new.is_empty() {
+            return Err(ActionRingSetupError::EmptyName);
+        }
+        if trimmed_new == DEFAULT_SETUP_NAME {
+            return Err(ActionRingSetupError::DefaultSetupReserved);
+        }
+        if self.setups.contains_key(trimmed_new) {
+            return Err(ActionRingSetupError::AlreadyExists(trimmed_new.to_string()));
+        }
+        let setup = self
+            .setups
+            .remove(old)
+            .ok_or_else(|| ActionRingSetupError::NotFound(old.to_string()))?;
+        self.setups.insert(trimmed_new.to_string(), setup);
+        Ok(())
+    }
+
+    /// Duplicate an existing setup (either default or a custom setup) to a new setup name.
+    pub fn duplicate_setup(
+        &mut self,
+        source: Option<&str>,
+        target: &str,
+    ) -> Result<(), ActionRingSetupError> {
+        let trimmed_target = target.trim();
+        if trimmed_target.is_empty() {
+            return Err(ActionRingSetupError::EmptyName);
+        }
+        if trimmed_target == DEFAULT_SETUP_NAME {
+            return Err(ActionRingSetupError::DefaultSetupReserved);
+        }
+        if self.setups.contains_key(trimmed_target) {
+            return Err(ActionRingSetupError::AlreadyExists(trimmed_target.to_string()));
+        }
+
+        let cloned = match source {
+            None => ActionRingSetup {
+                default: self.default.clone(),
+                per_app: self.per_app.clone(),
+            },
+            Some(name) if name == DEFAULT_SETUP_NAME => ActionRingSetup {
+                default: self.default.clone(),
+                per_app: self.per_app.clone(),
+            },
+            Some(name) => {
+                let src = self
+                    .setups
+                    .get(name)
+                    .ok_or_else(|| ActionRingSetupError::NotFound(name.to_string()))?;
+                src.clone()
+            }
+        };
+
+        self.setups.insert(trimmed_target.to_string(), cloned);
+        Ok(())
+    }
+
+    /// Delete an existing custom setup.
+    pub fn delete_setup(&mut self, name: &str) -> Result<(), ActionRingSetupError> {
+        if name == DEFAULT_SETUP_NAME {
+            return Err(ActionRingSetupError::DefaultSetupReserved);
+        }
+        self.setups
+            .remove(name)
+            .map(|_| ())
+            .ok_or_else(|| ActionRingSetupError::NotFound(name.to_string()))
+    }
 }
 
 const fn default_true() -> bool {
@@ -384,7 +581,11 @@ mod tests {
             Err(RingActionError::EmptyAction)
         );
         assert_eq!(
-            RingAction::new(Action::ShowActionsRing),
+            RingAction::new(Action::ShowActionsRing(None)),
+            Err(RingActionError::RecursiveTrigger)
+        );
+        assert_eq!(
+            RingAction::new(Action::ShowActionsRing(Some("Gaming".into()))),
             Err(RingActionError::RecursiveTrigger)
         );
     }
@@ -600,5 +801,185 @@ Bottom = { action = { CustomShortcut = "Cmd+Shift+P" } }
         assert_eq!(config.profile_layout(Some("exe:sharex.exe")), copy);
         assert_eq!(config.profile_layout(Some("app:sharex")), paste);
         assert_eq!(config.profile_layout(None), config.default);
+    }
+
+    #[test]
+    fn custom_setups_crud_and_default_reserved() {
+        let mut config = ActionRingConfig::default();
+        assert_eq!(config.setup_names(), vec!["Default"]);
+        assert_eq!(config.setup(None), None);
+        assert_eq!(config.setup(Some("Default")), None);
+
+        // Creating a new setup
+        config.create_setup("Gaming").expect("create Gaming setup");
+        assert_eq!(config.setup_names(), vec!["Default", "Gaming"]);
+        assert!(config.setup(Some("Gaming")).is_some());
+
+        // Default name is reserved
+        assert_eq!(
+            config.create_setup("Default"),
+            Err(ActionRingSetupError::DefaultSetupReserved)
+        );
+        // Duplicate name fails
+        assert_eq!(
+            config.create_setup("Gaming"),
+            Err(ActionRingSetupError::AlreadyExists("Gaming".into()))
+        );
+        // Empty name fails
+        assert_eq!(
+            config.create_setup("   "),
+            Err(ActionRingSetupError::EmptyName)
+        );
+
+        // Renaming "Default" is rejected
+        assert_eq!(
+            config.rename_setup("Default", "Primary"),
+            Err(ActionRingSetupError::DefaultSetupReserved)
+        );
+        // Renaming to "Default" is rejected
+        assert_eq!(
+            config.rename_setup("Gaming", "Default"),
+            Err(ActionRingSetupError::DefaultSetupReserved)
+        );
+        // Renaming custom setup succeeds
+        config
+            .rename_setup("Gaming", "Competitive")
+            .expect("rename Gaming to Competitive");
+        assert_eq!(config.setup(Some("Gaming")), None);
+        assert!(config.setup(Some("Competitive")).is_some());
+        assert_eq!(config.setup_names(), vec!["Default", "Competitive"]);
+
+        // Duplicating from Default
+        config
+            .duplicate_setup(None, "FromDefault")
+            .expect("duplicate from default");
+        assert_eq!(
+            config.setup(Some("FromDefault")).unwrap().default,
+            config.default
+        );
+
+        // Duplicating custom setup
+        config
+            .duplicate_setup(Some("Competitive"), "CopyComp")
+            .expect("duplicate custom setup");
+        assert!(config.setup(Some("CopyComp")).is_some());
+
+        // Deleting Default setup is rejected
+        assert_eq!(
+            config.delete_setup("Default"),
+            Err(ActionRingSetupError::DefaultSetupReserved)
+        );
+
+        // Deleting custom setup succeeds
+        config
+            .delete_setup("CopyComp")
+            .expect("delete custom setup");
+        assert_eq!(config.setup(Some("CopyComp")), None);
+    }
+
+    #[test]
+    fn setup_independent_layout_resolution() {
+        let mut config = ActionRingConfig::default();
+        config.create_setup("Gaming").expect("create Gaming");
+
+        let (browser_back_entry, safari_entry, expected_gaming_default) = {
+            let gaming_setup = config.setup_mut(Some("Gaming")).expect("gaming setup mut");
+            let browser_back_entry = ActionRingEntry::new(
+                RingAction::new(Action::BrowserBack).expect("browser back is valid"),
+            );
+            gaming_setup
+                .default
+                .slots
+                .insert(ActionRingSlot::Top, browser_back_entry.clone());
+
+            let safari_entry = ActionRingEntry::new(
+                RingAction::new(Action::NewTab).expect("new tab is valid"),
+            );
+            gaming_setup.per_app.insert(
+                "com.apple.Safari".to_string(),
+                ActionRingLayout {
+                    slots: BTreeMap::from([(ActionRingSlot::Top, safari_entry.clone())]),
+                },
+            );
+            (browser_back_entry, safari_entry, gaming_setup.default.clone())
+        };
+
+        let aliases = AppAliases::default();
+        // Resolving default setup
+        assert_eq!(
+            config.effective_layout_for(None, &aliases, Some("com.apple.Safari")),
+            config.default
+        );
+        // Resolving Gaming setup with app override
+        let gaming_safari = config.effective_layout_for(
+            Some("Gaming"),
+            &aliases,
+            Some("com.apple.Safari"),
+        );
+        assert_eq!(
+            gaming_safari.slots.get(&ActionRingSlot::Top),
+            Some(&safari_entry)
+        );
+        // Resolving Gaming setup without app override uses Gaming's default
+        let gaming_other = config.effective_layout_for(
+            Some("Gaming"),
+            &aliases,
+            Some("com.other.App"),
+        );
+        assert_eq!(
+            gaming_other.slots.get(&ActionRingSlot::Top),
+            Some(&browser_back_entry)
+        );
+        // Nonexistent setup safely falls back to default setup
+        assert_eq!(
+            config.effective_layout_for(Some("Nonexistent"), &aliases, None),
+            config.default
+        );
+
+        // Profile layout resolution
+        assert_eq!(
+            config.profile_layout_for(Some("Gaming"), Some("com.apple.Safari")),
+            ActionRingLayout {
+                slots: BTreeMap::from([(ActionRingSlot::Top, safari_entry)]),
+            }
+        );
+        assert_eq!(
+            config.profile_layout_for(Some("Gaming"), None),
+            expected_gaming_default
+        );
+    }
+
+    #[test]
+    fn legacy_and_multi_setup_config_toml_roundtrip() {
+        // Legacy single-setup config without `setups` table
+        let legacy_toml = concat!(
+            "enabled = true\n",
+            "haptics = true\n",
+            "\n",
+            "[default.slots.Top]\n",
+            "action = \"Cut\"\n",
+        );
+        let config: ActionRingConfig = toml::from_str(legacy_toml).expect("parse legacy config");
+        assert_eq!(config.setups.len(), 0);
+        let serialized = toml::to_string(&config).expect("serialize legacy config");
+        assert!(!serialized.contains("setups"));
+
+        // Multi-setup config serializes setups table
+        let mut multi = config;
+        multi.create_setup("Work").expect("create Work");
+        let multi_serialized = toml::to_string(&multi).expect("serialize multi-setup config");
+        assert!(multi_serialized.contains("setups.Work"));
+
+        let deserialized_multi: ActionRingConfig =
+            toml::from_str(&multi_serialized).expect("deserialize multi-setup config");
+        assert_eq!(deserialized_multi, multi);
+        assert!(deserialized_multi.setups.contains_key("Work"));
+    }
+
+    #[test]
+    fn action_ring_setup_default() {
+        let setup = ActionRingSetup::default();
+        assert_eq!(setup.default, ActionRingLayout::default());
+        assert!(setup.per_app.is_empty());
     }
 }

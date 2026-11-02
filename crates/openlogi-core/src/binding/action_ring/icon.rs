@@ -313,6 +313,7 @@ macro_rules! derive_action_icon {
             pub fn for_action(action: &Action) -> Self {
                 match action {
                     $( Action::$variant => Self::$icon, )*
+                    Action::ShowActionsRing(_) => Self::Grid,
                     Action::SetDpiPreset(_) => Self::Gauge,
                     Action::CustomShortcut(_)
                     | Action::TypeText(_)

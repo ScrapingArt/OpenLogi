@@ -551,7 +551,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(actions.contains(&Action::MissionControl));
         assert!(!actions.contains(&Action::None));
-        assert!(!actions.contains(&Action::ShowActionsRing));
+        assert!(!actions.iter().any(|a| matches!(a, Action::ShowActionsRing(_))));
     }
 
     #[test]

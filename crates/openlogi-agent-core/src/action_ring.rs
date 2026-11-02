@@ -520,4 +520,31 @@ mod tests {
         assert!(ring.has_changed().unwrap(), "expiration must notify");
         assert_eq!(ring.borrow_and_update().invocation, None);
     }
+
+    #[test]
+    fn triggering_different_setup_specs_activates_distinct_actions() {
+        let manager = ActionRingManager::default();
+
+        let mut default_spec = spec();
+        default_spec.layout.set_action(
+            ActionRingSlot::Top,
+            Some(openlogi_core::binding::RingAction::new(Action::Cut).unwrap()),
+        );
+        let default_invocation = manager.begin(default_spec);
+        let default_activation = manager
+            .activate(default_invocation.session_id, ActionRingSlot::Top)
+            .expect("default session must activate Top slot");
+        assert_eq!(default_activation.action, Action::Cut);
+
+        let mut gaming_spec = spec();
+        gaming_spec.layout.set_action(
+            ActionRingSlot::Top,
+            Some(openlogi_core::binding::RingAction::new(Action::Copy).unwrap()),
+        );
+        let gaming_invocation = manager.begin(gaming_spec);
+        let gaming_activation = manager
+            .activate(gaming_invocation.session_id, ActionRingSlot::Top)
+            .expect("gaming session must activate Top slot");
+        assert_eq!(gaming_activation.action, Action::Copy);
+    }
 }

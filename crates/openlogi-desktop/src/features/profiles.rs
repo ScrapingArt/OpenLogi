@@ -185,7 +185,11 @@ pub(crate) fn action_ring_profile_scope_bar(
     let remove_all_key = key.clone();
     let editing_app = state.editing_action_ring_app().map(str::to_string);
     let ring = state.current_action_ring();
-    let saved: Vec<&str> = ring.per_app.keys().map(String::as_str).collect();
+    let saved: Vec<&str> = if let Some(custom) = ring.setup(state.editing_action_ring_setup()) {
+        custom.per_app.keys().map(String::as_str).collect()
+    } else {
+        ring.per_app.keys().map(String::as_str).collect()
+    };
     let (profiles, coverage) = scope_profiles(state, &saved, editing_app.as_deref());
     let recent_apps: Vec<(String, String)> = state
         .recent_apps()

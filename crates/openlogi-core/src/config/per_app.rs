@@ -144,6 +144,13 @@ impl Config {
                 .per_app_bindings
                 .keys()
                 .chain(device.action_ring.per_app.keys())
+                .chain(
+                    device
+                        .action_ring
+                        .setups
+                        .values()
+                        .flat_map(|setup| setup.per_app.keys()),
+                )
                 .find(|key| self.apps.is_undefined_reference(key))
                 .map(|key| (device_key.as_str(), key.as_str()))
         })

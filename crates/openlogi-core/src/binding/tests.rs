@@ -177,13 +177,72 @@ fn workflow_roundtrips_toml() {
 
 #[test]
 fn actions_ring_is_available_to_normal_and_gesture_pickers() {
-    assert_eq!(Action::ShowActionsRing.label(), "Actions Ring");
-    assert_eq!(Action::ShowActionsRing.category(), Category::System);
-    assert!(Action::catalog().contains(&Action::ShowActionsRing));
+    assert_eq!(Action::ShowActionsRing(None).label(), "Actions Ring");
     assert_eq!(
-        RingAction::new(Action::ShowActionsRing),
+        Action::ShowActionsRing(Some("Gaming".into())).label(),
+        "Actions Ring (Gaming)"
+    );
+    assert_eq!(Action::ShowActionsRing(None).category(), Category::System);
+    assert!(Action::catalog().contains(&Action::ShowActionsRing(None)));
+    assert_eq!(
+        RingAction::new(Action::ShowActionsRing(None)),
         Err(RingActionError::RecursiveTrigger)
     );
+    assert_eq!(
+        RingAction::new(Action::ShowActionsRing(Some("Gaming".into()))),
+        Err(RingActionError::RecursiveTrigger)
+    );
+}
+
+#[test]
+fn show_actions_ring_serde_compatibility() {
+    #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+    struct Wrapper {
+        action: Action,
+    }
+
+    // Bare string deserialization and serialization for None (default setup)
+    let legacy_toml = "action = \"ShowActionsRing\"\n";
+    let deserialized: Wrapper = toml::from_str(legacy_toml).expect("deserialize legacy bare string");
+    assert_eq!(deserialized.action, Action::ShowActionsRing(None));
+    let serialized = toml::to_string(&deserialized).expect("serialize None");
+    assert_eq!(serialized, legacy_toml);
+
+    // Named setup serialization and deserialization
+    let named_action = Wrapper {
+        action: Action::ShowActionsRing(Some("Gaming".into())),
+    };
+    let serialized_named = toml::to_string(&named_action).expect("serialize named setup");
+    assert_eq!(serialized_named, "[action]\nShowActionsRing = \"Gaming\"\n");
+    let deserialized_named: Wrapper =
+        toml::from_str(&serialized_named).expect("deserialize named setup");
+    assert_eq!(deserialized_named, named_action);
+
+    // Also assert inline table deserialization works
+    let inline_toml = "action = { ShowActionsRing = \"Gaming\" }\n";
+    let deserialized_inline: Wrapper =
+        toml::from_str(inline_toml).expect("deserialize inline named setup");
+    assert_eq!(deserialized_inline, named_action);
+}
+
+#[test]
+fn action_rename_and_delete_setup() {
+    let mut action = Action::ShowActionsRing(Some("Gaming".into()));
+    action.rename_setup("Work", "Office");
+    assert_eq!(action, Action::ShowActionsRing(Some("Gaming".into())));
+    action.rename_setup("Gaming", "Competitive");
+    assert_eq!(action, Action::ShowActionsRing(Some("Competitive".into())));
+
+    action.delete_setup("Work");
+    assert_eq!(action, Action::ShowActionsRing(Some("Competitive".into())));
+    action.delete_setup("Competitive");
+    assert_eq!(action, Action::ShowActionsRing(None));
+
+    let mut unconfigured = Action::ShowActionsRing(None);
+    unconfigured.rename_setup("Default", "Primary");
+    assert_eq!(unconfigured, Action::ShowActionsRing(None));
+    unconfigured.delete_setup("Default");
+    assert_eq!(unconfigured, Action::ShowActionsRing(None));
 }
 
 // ── Binding (merged model) serde routing ──────────────────────────────────
@@ -647,7 +706,7 @@ fn dpi_toggle_default_is_cycle_dpi_presets() {
 fn haptic_panel_defaults_to_opening_the_actions_ring() {
     assert_eq!(
         default_binding(ButtonId::HapticPanel),
-        Action::ShowActionsRing
+        Action::ShowActionsRing(None)
     );
     assert!(ButtonId::ALL.contains(&ButtonId::HapticPanel));
 }
@@ -775,7 +834,7 @@ fn power_user_and_device_side_actions_lower_to_the_expected_bucket() {
         Action::CycleDpiPresets,
         Action::SetDpiPreset(2),
         Action::ToggleSmartShift,
-        Action::ShowActionsRing,
+        Action::ShowActionsRing(None),
     ] {
         assert_matches!(action.effect(), Effect::AgentSide);
     }

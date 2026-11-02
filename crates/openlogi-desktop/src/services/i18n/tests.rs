@@ -98,3 +98,18 @@ fn czech_pairing_translations_resolve() {
         "Spárováno na pozici 2."
     );
 }
+
+#[test]
+fn show_actions_ring_label_includes_setup_name_when_configured() {
+    let _locale = super::LOCALE_LOCK.lock();
+    rust_i18n::set_locale("en");
+    assert_eq!(
+        localized_action_label(&Action::ShowActionsRing(None)).to_string(),
+        "Actions Ring"
+    );
+    assert_eq!(
+        localized_action_label(&Action::ShowActionsRing(Some("Gaming".into()))).to_string(),
+        "Actions Ring (Gaming)"
+    );
+}
+

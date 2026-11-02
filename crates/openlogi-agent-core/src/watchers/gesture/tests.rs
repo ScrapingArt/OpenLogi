@@ -887,7 +887,7 @@ async fn gesture_click_without_a_double_click_binding_fires_every_click_at_once(
     configured.dispatch.gesture_bindings.insert(
         ButtonId::GestureButton,
         [
-            (GestureDirection::Click, Action::ShowActionsRing),
+            (GestureDirection::Click, Action::ShowActionsRing(None)),
             (GestureDirection::DoubleClick, Action::None),
         ]
         .into(),
@@ -952,7 +952,7 @@ async fn gesture_double_click_debounces_single_click() {
     configured.dispatch.gesture_bindings.insert(
         ButtonId::GestureButton,
         [
-            (GestureDirection::Click, Action::ShowActionsRing),
+            (GestureDirection::Click, Action::ShowActionsRing(None)),
             (GestureDirection::DoubleClick, Action::Copy),
         ]
         .into(),

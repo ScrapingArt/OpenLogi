@@ -98,12 +98,21 @@ impl HeldShortcuts {
     }
 }
 
+/// Trigger event requesting an Actions Ring overlay session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActionRingTrigger {
+    /// Config key of the triggering device, if known.
+    pub device_key: Option<String>,
+    /// Named setup to display, or `None` for the default setup.
+    pub setup: Option<String>,
+}
+
 #[derive(Clone)]
 struct ActionExecutor {
     dpi_cycle: Arc<RwLock<DpiCycles>>,
     pointer_speeds: Arc<PointerSpeeds>,
     access: DeviceAccess,
-    action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
+    action_ring: tokio::sync::mpsc::UnboundedSender<ActionRingTrigger>,
 }
 
 impl ActionExecutor {
@@ -147,10 +156,13 @@ impl ActionExecutor {
         // the pointer is over the ring's own floating window, which classifies
         // as `PointerTarget::Unavailable`, and a gated second trigger press
         // could never close the ring.
-        if matches!(action, Action::ShowActionsRing) {
+        if let Action::ShowActionsRing(setup) = action {
             if self
                 .action_ring
-                .send(device_key.map(str::to_owned))
+                .send(ActionRingTrigger {
+                    device_key: device_key.map(str::to_owned),
+                    setup: setup.clone(),
+                })
                 .is_err()
             {
                 warn!("Actions Ring runtime unavailable — trigger ignored");
@@ -337,7 +349,7 @@ impl ActionRuntime {
         dpi_cycle: Arc<RwLock<DpiCycles>>,
         pointer_speeds: Arc<PointerSpeeds>,
         access: DeviceAccess,
-        action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
+        action_ring: tokio::sync::mpsc::UnboundedSender<ActionRingTrigger>,
     ) -> io::Result<Self> {
         let executor = ActionExecutor {
             dpi_cycle,
@@ -776,7 +788,7 @@ mod tests {
         };
 
         executor.dispatch_to(
-            &Action::ShowActionsRing,
+            &Action::ShowActionsRing(None),
             Some("mouse"),
             ActionDispatchTarget::for_pointer(
                 Some(openlogi_hook::PointerTarget::Unavailable),
@@ -784,7 +796,30 @@ mod tests {
             ),
         );
 
-        assert_eq!(ring_rx.try_recv(), Ok(Some("mouse".to_owned())));
+        assert_eq!(
+            ring_rx.try_recv(),
+            Ok(ActionRingTrigger {
+                device_key: Some("mouse".to_owned()),
+                setup: None,
+            })
+        );
+
+        executor.dispatch_to(
+            &Action::ShowActionsRing(Some("Gaming".to_string())),
+            Some("mouse"),
+            ActionDispatchTarget::for_pointer(
+                Some(openlogi_hook::PointerTarget::Unavailable),
+                || None,
+            ),
+        );
+
+        assert_eq!(
+            ring_rx.try_recv(),
+            Ok(ActionRingTrigger {
+                device_key: Some("mouse".to_owned()),
+                setup: Some("Gaming".to_string()),
+            })
+        );
     }
     #[test]
     fn instantaneous_actions_do_not_enter_held_state() {

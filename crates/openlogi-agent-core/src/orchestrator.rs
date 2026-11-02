@@ -1579,13 +1579,20 @@ impl Orchestrator {
     }
 
     /// Snapshot the active device and effective ring layout for a new
-    /// invocation. `None` means the ring is disabled, empty, or has no active
+    /// invocation.
+    ///
+    /// `setup` selects which named Actions Ring setup to display; passing
+    /// `None` or an unregistered setup name safely resolves to the default
+    /// setup layout.
+    ///
+    /// Returns `None` if the ring is disabled, empty, or has no active
     /// persistent device. The returned layout is owned so later config and
     /// foreground-app changes cannot alter an already-open ring session.
     #[must_use]
     pub fn action_ring_session(
         &self,
         triggering_device: Option<&str>,
+        setup: Option<&str>,
     ) -> Option<ActionRingSessionSpec> {
         let key = triggering_device.or_else(|| self.current_key())?;
         let device = self
@@ -1596,7 +1603,8 @@ impl Orchestrator {
         if !ring.enabled {
             return None;
         }
-        let layout = ring.effective_layout(&self.config.apps, self.current_app.as_deref());
+        let layout =
+            ring.effective_layout_for(setup, &self.config.apps, self.current_app.as_deref());
         if layout.slots.is_empty() {
             return None;
         }

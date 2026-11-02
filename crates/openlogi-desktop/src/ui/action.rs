@@ -37,6 +37,9 @@ pub(crate) fn localized_action_label(action: &Action) -> SharedString {
         Action::OpenApplication(target) => {
             tr!("actions.open_named_target", name => target.display_name())
         }
+        Action::ShowActionsRing(Some(setup)) => {
+            format!("{} ({setup})", tr!("action_ring.actions_ring")).into()
+        }
         _ => tr!(action
             .translation_key()
             .expect("every payload-free action has a translation key")),

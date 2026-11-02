@@ -82,7 +82,7 @@ pub(crate) fn action_icon_path(action: &Action) -> &'static str {
         Action::NextTab => "action-icons/chevron-right.svg",
         Action::PrevTab => "action-icons/chevron-left.svg",
         Action::ReloadPage => "action-icons/rotate-cw.svg",
-        Action::MissionControl | Action::ShowActionsRing => "action-icons/layout-grid.svg",
+        Action::MissionControl | Action::ShowActionsRing(_) => "action-icons/layout-grid.svg",
         Action::AppExpose => "action-icons/layers.svg",
         Action::PreviousDesktop => "action-icons/square-arrow-left.svg",
         Action::NextDesktop => "action-icons/square-arrow-right.svg",
@@ -252,7 +252,7 @@ mod tests {
             .into_iter()
             .flat_map(|(_, actions)| actions)
             .collect::<Vec<_>>();
-        assert!(actions.contains(&Action::ShowActionsRing));
+        assert!(actions.contains(&Action::ShowActionsRing(None)));
     }
 
     /// [`action_icon_path`] is exhaustive over [`Action`], so the compiler
