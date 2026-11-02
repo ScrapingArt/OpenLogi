@@ -533,6 +533,13 @@ fn setup_tab(
                 pal.control_hover
             })
         })
+        .focus_visible(move |tab| {
+            tab.bg(if selected {
+                theme::accent_tint_hover()
+            } else {
+                pal.control_hover
+            })
+        })
         .child(label)
 }
 

@@ -22,7 +22,7 @@ fn create_action_ring_setup_creates_new_setup_and_switches_editor() {
     );
 
     let result = state.create_action_ring_setup("Gaming");
-    assert!(result.is_ok());
+    let _ = result.unwrap();
     assert_eq!(state.editing_action_ring_setup(), Some("Gaming"));
     assert_eq!(
         state.current_action_ring().setup_names(),
@@ -258,5 +258,71 @@ fn duplicate_action_ring_setup_clones_custom_or_default_setup() {
     assert_eq!(
         state.current_action_ring().setups["DefaultClone"].default,
         state.current_action_ring().default
+    );
+}
+
+#[test]
+fn remove_all_app_profiles_prunes_custom_setups() {
+    let config = Config::ephemeral();
+    let resolver = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources {
+        inventories: &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
+        persistence: ConfigPersistence::MemoryOnly,
+        ..Sources::in_memory(config, &resolver, commands)
+    });
+
+    let _ = state.create_action_ring_setup("Design").unwrap();
+    let _ = state.set_editing_action_ring_setup(Some("Design".into()));
+    let _ = state.set_editing_action_ring_app(Some("Figma".into()));
+    let _ = state.commit_action_ring_slot(
+        ActionRingSlot::Top,
+        Some(RingAction::new(Action::Undo).unwrap()),
+    );
+
+    assert!(
+        state.current_action_ring().setups["Design"]
+            .per_app
+            .contains_key("Figma")
+    );
+
+    let _ = state.remove_all_app_profiles(&DeviceKey::from(KNOWN_MOUSE_KEY), "Figma");
+
+    assert!(
+        !state.current_action_ring().setups["Design"]
+            .per_app
+            .contains_key("Figma")
+    );
+}
+
+#[test]
+fn edit_action_ring_layout_with_default_setup_name_targets_default_layout() {
+    let config = Config::ephemeral();
+    let resolver = AssetResolver::new();
+    let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = AppState::new(Sources {
+        inventories: &[direct_inventory([0xa3, 0x93, 0xca, 0xe0])],
+        persistence: ConfigPersistence::MemoryOnly,
+        ..Sources::in_memory(config, &resolver, commands)
+    });
+
+    state
+        .action_ring_editing_setups
+        .insert(KNOWN_MOUSE_KEY.into(), DEFAULT_SETUP_NAME.into());
+
+    let _ = state.commit_action_ring_slot(
+        ActionRingSlot::Top,
+        Some(RingAction::new(Action::Paste).unwrap()),
+    );
+
+    assert!(
+        !state
+            .current_action_ring()
+            .setups
+            .contains_key(DEFAULT_SETUP_NAME)
+    );
+    assert_eq!(
+        state.current_action_ring().default.slots[&ActionRingSlot::Top].action(),
+        &Action::Paste
     );
 }

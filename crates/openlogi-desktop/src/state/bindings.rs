@@ -321,7 +321,13 @@ impl AppState {
             };
             let buttons = device.per_app_bindings.remove(app).is_some();
             let ring = device.action_ring.per_app.remove(app).is_some();
-            buttons || ring
+            let mut setups = false;
+            for setup in device.action_ring.setups.values_mut() {
+                if setup.per_app.remove(app).is_some() {
+                    setups = true;
+                }
+            }
+            buttons || ring || setups
         });
         if changed && !self.persist_and_reload("all application profiles") {
             return StateEvent::BindingsChanged(key.clone()).into();

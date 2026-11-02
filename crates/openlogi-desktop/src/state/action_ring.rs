@@ -129,7 +129,7 @@ impl AppState {
         self.config.edit(|config| {
             let ring = &mut config.devices.entry(key).or_default().action_ring;
             let layout = match setup.as_deref() {
-                Some(setup_name) => {
+                Some(setup_name) if setup_name != DEFAULT_SETUP_NAME => {
                     let custom = ring.setups.entry(setup_name.to_string()).or_default();
                     match app {
                         Some(app) => {
@@ -139,7 +139,7 @@ impl AppState {
                         None => &mut custom.default,
                     }
                 }
-                None => match app {
+                _ => match app {
                     Some(app) => {
                         let inherited = ring.default.clone();
                         ring.per_app.entry(app).or_insert(inherited)
