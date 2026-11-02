@@ -138,7 +138,7 @@ fn lighting_changed(key: &DeviceKey) -> StateEvent {
 }
 
 /// A state holding the one persistent mouse, so per-device config has a key.
-pub(super) fn state_with_a_known_mouse() -> AppState {
+pub(crate) fn state_with_a_known_mouse() -> AppState {
     let resolver = AssetResolver::new();
     let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut inventory = direct_inventory([0xa3, 0x93, 0xca, 0xe0]);

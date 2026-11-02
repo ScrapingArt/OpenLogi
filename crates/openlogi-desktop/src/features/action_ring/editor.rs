@@ -16,6 +16,7 @@ use openlogi_core::binding::{
 use super::action_icons::action_icon_path;
 use crate::features::binding_editor::editor_section;
 use crate::features::keyboard::editors::PowerUserKind;
+use crate::platform::file_picker::prompt_for_application_or_folder;
 use crate::state::AppState;
 use crate::ui::action::localized_action_label;
 use crate::ui::components::{MenuRow, control_input};
@@ -230,6 +231,7 @@ fn shortcut_editor(
 
 fn path_editor(slot: ActionRingSlot, input: &Entity<InputState>, pal: Palette) -> impl IntoElement {
     let submit_input = input.clone();
+    let browse_input = input.clone();
     v_flex()
         .gap_1()
         .child(editor_section(
@@ -244,6 +246,37 @@ fn path_editor(slot: ActionRingSlot, input: &Entity<InputState>, pal: Palette) -
                         .flex_1()
                         .min_w_0()
                         .child(control_input(input).cleanable(true)),
+                )
+                .child(
+                    Button::new("ring-browse-path")
+                        .debug_selector(|| "ring-browse-path".to_string())
+                        .compact()
+                        .label(tr!("common.browse"))
+                        .on_click(move |_, window, cx| {
+                            let rx = prompt_for_application_or_folder(cx);
+                            let input = browse_input.clone();
+                            window
+                                .spawn(cx, async move |cx| {
+                                    if let Ok(Some(path)) = rx.await {
+                                        let path_str = path.to_string_lossy().to_string();
+                                        if let Ok(target) =
+                                            ApplicationTarget::new(path_str.clone(), "")
+                                        {
+                                            let _ = cx.update(|window, cx| {
+                                                input.update(cx, |input, cx| {
+                                                    input.set_value(path_str, window, cx);
+                                                });
+                                                commit_action(
+                                                    slot,
+                                                    Action::OpenApplication(target),
+                                                    cx,
+                                                );
+                                            });
+                                        }
+                                    }
+                                })
+                                .detach();
+                        }),
                 )
                 .child(
                     Button::new("ring-add-path")
@@ -396,8 +429,8 @@ fn commit_icon(slot: ActionRingSlot, icon: Option<ActionRingIcon>, cx: &mut gpui
 #[cfg(test)]
 mod tests {
     use gpui::{
-        Context, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent, TestAppContext, Window,
-        point, px,
+        AppContext as _, Context, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent,
+        TestAppContext, Window, point, px,
     };
 
     use super::*;
@@ -547,5 +580,89 @@ mod tests {
             power_user_action(PowerUserKind::Workflow, "irrelevant".to_string()),
             None
         );
+    }
+
+    struct PathEditorTestView {
+        input: Entity<InputState>,
+    }
+
+    impl Render for PathEditorTestView {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let pal = theme::palette(cx);
+            path_editor(ActionRingSlot::Top, &self.input, pal)
+        }
+    }
+
+    #[gpui::test]
+    fn path_editor_browse_application_or_folder(cx: &mut TestAppContext) {
+        let _locale = crate::services::i18n::LOCALE_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        cx.update(gpui_component::init);
+        cx.update(|cx| {
+            let state = cx.new(|_| crate::state::tests::state_with_a_known_mouse());
+            AppState::set_global(state, cx);
+        });
+
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let input = cx.new(|cx| InputState::new(window, cx));
+            PathEditorTestView { input }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        // Verify Browse button presence via debug selector
+        assert!(cx.debug_bounds("ring-browse-path").is_some());
+
+        // 1. Cancelling prompt keeps existing input
+        cx.update(|window, cx| {
+            let input = view.read(cx).input.clone();
+            input.update(cx, |input, cx| input.set_value("/Applications/Notes.app", window, cx));
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let bounds = cx.debug_bounds("ring-browse-path").expect("ring-browse-path exists");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+        assert!(cx.did_prompt_for_paths());
+        cx.simulate_path_prompt_response(|options| {
+            assert!(options.files);
+            assert!(options.directories);
+            assert!(!options.multiple);
+            None
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        view.read_with(cx, |view, cx| {
+            assert_eq!(view.input.read(cx).value(), "/Applications/Notes.app");
+        });
+
+        // 2. Selecting a path updates input text and commits action
+        let bounds = cx.debug_bounds("ring-browse-path").expect("ring-browse-path exists");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+        assert!(cx.did_prompt_for_paths());
+        cx.simulate_path_prompt_response(|options| {
+            assert!(options.files);
+            assert!(options.directories);
+            assert!(!options.multiple);
+            Some(vec![std::path::PathBuf::from("/Applications/Calculator.app")])
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        view.read_with(cx, |view, cx| {
+            assert_eq!(view.input.read(cx).value(), "/Applications/Calculator.app");
+        });
+        cx.update(|_, cx| {
+            let state = AppState::try_read(cx).unwrap();
+            let layout = state.current_action_ring_layout();
+            let entry = layout.slots.get(&ActionRingSlot::Top).expect("slot Top must be set");
+            let Action::OpenApplication(target) = entry.action() else {
+                panic!("action must be OpenApplication");
+            };
+            assert_eq!(target.path(), "/Applications/Calculator.app");
+        });
+
+        drop(view);
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
     }
 }

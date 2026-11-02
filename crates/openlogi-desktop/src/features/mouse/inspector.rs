@@ -22,6 +22,7 @@ use crate::features::binding_editor::{
     GESTURE_BUTTON_ICON, PickFn, action_icon_path, action_rows_matching, editor_section,
     gesture_direction_icon,
 };
+use crate::platform::file_picker::prompt_for_application_or_folder;
 use crate::state::{AppState, TriggerSlot};
 use crate::ui::action::localized_action_label;
 use crate::ui::components::{MenuRow, Toggle, control_button, control_input, toggle_row};
@@ -1261,8 +1262,11 @@ fn custom_application_editor(
     pal: Palette,
 ) -> impl IntoElement {
     let submit_input = input.clone();
+    let browse_input = input.clone();
     let on_pick = on_pick.clone();
+    let browse_on_pick = on_pick.clone();
     let view = view.clone();
+    let browse_view = view.clone();
     v_flex()
         .gap_1()
         .child(editor_section(
@@ -1278,6 +1282,46 @@ fn custom_application_editor(
                         .min_w_0()
                         .debug_selector(move || format!("{id_prefix}-custom-application-input"))
                         .child(control_input(input).cleanable(true)),
+                )
+                .child(
+                    Button::new(format!("{id_prefix}-custom-application-browse"))
+                        .debug_selector(move || format!("{id_prefix}-custom-application-browse"))
+                        .compact()
+                        .label(tr!("common.browse"))
+                        .on_click(move |_, window, cx| {
+                            let rx = prompt_for_application_or_folder(cx);
+                            let input = browse_input.clone();
+                            let view = browse_view.clone();
+                            let on_pick = browse_on_pick.clone();
+                            window
+                                .spawn(cx, async move |cx| {
+                                    if let Ok(Some(path)) = rx.await {
+                                        let path_str = path.to_string_lossy().to_string();
+                                        if let Ok(target) =
+                                            openlogi_core::binding::ApplicationTarget::new(
+                                                path_str.clone(),
+                                                "",
+                                            )
+                                        {
+                                            let _ = cx.update(|window, cx| {
+                                                input.update(cx, |input, cx| {
+                                                    input.set_value(path_str, window, cx);
+                                                });
+                                                view.update(cx, |view, cx| {
+                                                    view.custom_application_invalid = false;
+                                                    cx.notify();
+                                                });
+                                                (on_pick)(
+                                                    Action::OpenApplication(target),
+                                                    window,
+                                                    cx,
+                                                );
+                                            });
+                                        }
+                                    }
+                                })
+                                .detach();
+                        }),
                 )
                 .child(
                     Button::new(format!("{id_prefix}-custom-application-add"))
