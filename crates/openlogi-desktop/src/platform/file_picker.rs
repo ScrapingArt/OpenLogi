@@ -16,6 +16,9 @@ use objc2_app_kit::NSOpenPanel;
 #[cfg(target_os = "macos")]
 use objc2_foundation::{MainThreadMarker, NSString, NSURL};
 
+/// Default directory path presented by the macOS application picker.
+pub const DEFAULT_APPLICATIONS_DIR: &str = "/Applications";
+
 /// Configure an `NSOpenPanel` for selecting an application bundle or folder,
 /// defaulting to `/Applications`.
 #[cfg(target_os = "macos")]
@@ -25,7 +28,7 @@ pub fn configure_open_panel(mtm: MainThreadMarker) -> Retained<NSOpenPanel> {
     panel.setCanChooseDirectories(true);
     panel.setCanChooseFiles(true);
     panel.setAllowsMultipleSelection(false);
-    let app_dir = NSString::from_str("/Applications");
+    let app_dir = NSString::from_str(DEFAULT_APPLICATIONS_DIR);
     let app_url = NSURL::fileURLWithPath(&app_dir);
     panel.setDirectoryURL(Some(&app_url));
     panel
@@ -114,21 +117,23 @@ pub fn prompt_for_application_or_folder(cx: &App) -> Receiver<Option<PathBuf>> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn default_applications_dir() {
+        assert_eq!(DEFAULT_APPLICATIONS_DIR, "/Applications");
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
+    #[ignore = "AppKit NSOpenPanel requires the main thread; cargo test runs on worker threads"]
     fn configure_open_panel_mac() {
-        let Some(mtm) = MainThreadMarker::new() else {
-            // MainThreadMarker is only available on the AppKit main thread; cargo test
-            // executes tests on worker threads where AppKit rejects panel construction.
-            return;
-        };
+        let mtm = MainThreadMarker::new().expect("MainThreadMarker required");
         let panel = configure_open_panel(mtm);
         assert!(panel.canChooseDirectories());
         assert!(panel.canChooseFiles());
         assert!(!panel.allowsMultipleSelection());
         let dir = panel.directoryURL().expect("directoryURL must be set");
         let path = dir.path().expect("directoryURL must have path");
-        assert_eq!(path.to_string(), "/Applications");
+        assert_eq!(path.to_string(), DEFAULT_APPLICATIONS_DIR);
     }
 
     #[gpui::test]
