@@ -13,7 +13,7 @@ use gpui_component::{
     input::{InputEvent, InputState},
     v_flex,
 };
-use openlogi_core::binding::{Action, ButtonId, GestureDirection};
+use openlogi_core::binding::{Action, ButtonId, DEFAULT_SETUP_NAME, GestureDirection};
 
 use super::force_sensing::{ForceSensingFacts, ForceSensingSlider, PressForce};
 use super::geometry::{
@@ -438,6 +438,17 @@ impl Render for MouseModelView {
             }
             _ => 400,
         };
+        let action_ring_setups = AppState::try_read(cx).map_or_else(
+            || vec![DEFAULT_SETUP_NAME.to_string()],
+            |state| {
+                state
+                    .current_action_ring()
+                    .setup_names()
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            },
+        );
 
         let inspector = binding_inspector(
             BindingInspectorData {
@@ -456,6 +467,7 @@ impl Render for MouseModelView {
                 hold_action: hold_action.as_ref(),
                 wheel_hold_mode,
                 debounce_ms,
+                action_ring_setups: &action_ring_setups,
             },
             ActionPickerContext {
                 open: self.action_picker_open,

@@ -4,15 +4,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use gpui::{
-    Context, Entity, InteractiveElement, IntoElement, ParentElement, Role,
+    App, Context, Entity, InteractiveElement, IntoElement, ParentElement, Role,
     StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px, rgb, svg,
 };
 use gpui_base::{Button as BaseButton, StyledExt as _};
 use gpui_component::{
     Disableable as _, Icon, IconName, Selectable as _, Sizable as _, button::Button,
-    h_flex, input::InputState, scroll::ScrollableElement as _, v_flex,
+    h_flex, input::InputState, menu::{DropdownMenu as _, PopupMenuItem},
+    scroll::ScrollableElement as _, v_flex,
 };
-use openlogi_core::binding::{Action, ButtonId, GestureDirection, default_binding};
+use openlogi_core::binding::{
+    Action, ButtonId, DEFAULT_SETUP_NAME, GestureDirection, default_binding,
+};
 
 use super::force_sensing::{PressForce, force_sensing_row};
 use super::hotspots::MouseControlId;
@@ -53,6 +56,7 @@ pub(super) struct BindingInspectorData<'a> {
     pub hold_action: Option<&'a Action>,
     pub wheel_hold_mode: Option<openlogi_core::binding::HeldWheel>,
     pub debounce_ms: u32,
+    pub action_ring_setups: &'a [String],
 }
 
 #[derive(Clone, Copy)]
@@ -205,7 +209,23 @@ fn button_inspector(
             pal,
         ))
         .when(is_app, |panel| {
-            panel.child(current_action_card(&action, picker, pal))
+            panel
+                .child(current_action_card(&action, picker, pal))
+                .children(action_ring_setup_selector(
+                    "inspector-setup",
+                    &action,
+                    data.action_ring_setups,
+                    pal,
+                    {
+                        let observer = picker.view.clone();
+                        move |setup, _window, cx| {
+                            AppState::apply(cx, |state| {
+                                state.commit_binding(button, Action::ShowActionsRing(setup))
+                            });
+                            observer.update(cx, |_, cx| cx.notify());
+                        }
+                    },
+                ))
         })
         .when(!is_app, |panel| {
             let double_action = data.double_click_action;
@@ -220,21 +240,61 @@ fn button_inspector(
                     pal,
                     None,
                 ))
+                .children(action_ring_setup_selector(
+                    "inspector-setup",
+                    data.click_action,
+                    data.action_ring_setups,
+                    pal,
+                    {
+                        let observer = picker.view.clone();
+                        move |setup, _window, cx| {
+                            AppState::apply(cx, |state| {
+                                state.commit_trigger_binding(
+                                    button,
+                                    TriggerSlot::Click,
+                                    Some(Action::ShowActionsRing(setup)),
+                                )
+                            });
+                            observer.update(cx, |_, cx| cx.notify());
+                        }
+                    },
+                ))
                 .when(!data.wheel_hold.contains(&button), |p| {
                     p.child(if let Some(act) = double_action {
-                        trigger_action_card(
-                            "inspector-double-click-action",
-                            tr!("actions.double_click"),
-                            TriggerSlot::DoubleClick,
-                            Some(act),
-                            picker,
-                            pal,
-                            Some(Rc::new(move |_window: &mut Window, cx: &mut Context<MouseModelView>| {
-                                AppState::apply(cx, |state| state.commit_trigger_binding(button, TriggerSlot::DoubleClick, None));
-                            })),
-                        )
+                        v_flex()
+                            .gap_2()
+                            .child(trigger_action_card(
+                                "inspector-double-click-action",
+                                tr!("actions.double_click"),
+                                TriggerSlot::DoubleClick,
+                                Some(act),
+                                picker,
+                                pal,
+                                Some(Rc::new(move |_window: &mut Window, cx: &mut Context<MouseModelView>| {
+                                    AppState::apply(cx, |state| state.commit_trigger_binding(button, TriggerSlot::DoubleClick, None));
+                                })),
+                            ))
+                            .children(action_ring_setup_selector(
+                                "inspector-double-click-setup",
+                                act,
+                                data.action_ring_setups,
+                                pal,
+                                {
+                                    let observer = picker.view.clone();
+                                    move |setup, _window, cx| {
+                                        AppState::apply(cx, |state| {
+                                            state.commit_trigger_binding(
+                                                button,
+                                                TriggerSlot::DoubleClick,
+                                                Some(Action::ShowActionsRing(setup)),
+                                            )
+                                        });
+                                        observer.update(cx, |_, cx| cx.notify());
+                                    }
+                                },
+                            ))
                     } else {
-                        trigger_action_card(
+                        v_flex().child(trigger_action_card(
                             "inspector-double-click-action",
                             tr!("actions.add_double_click"),
                             TriggerSlot::DoubleClick,
@@ -242,24 +302,45 @@ fn button_inspector(
                             picker,
                             pal,
                             None,
-                        )
+                        ))
                     })
                 })
                 .when(!data.wheel_hold.contains(&button), |p| {
                     p.child(if let Some(act) = hold_action {
-                        trigger_action_card(
-                            "inspector-hold-action",
-                            tr!("actions.click_and_hold"),
-                            TriggerSlot::Hold,
-                            Some(act),
-                            picker,
-                            pal,
-                            Some(Rc::new(move |_window: &mut Window, cx: &mut Context<MouseModelView>| {
-                                AppState::apply(cx, |state| state.commit_trigger_binding(button, TriggerSlot::Hold, None));
-                            })),
-                        )
+                        v_flex()
+                            .gap_2()
+                            .child(trigger_action_card(
+                                "inspector-hold-action",
+                                tr!("actions.click_and_hold"),
+                                TriggerSlot::Hold,
+                                Some(act),
+                                picker,
+                                pal,
+                                Some(Rc::new(move |_window: &mut Window, cx: &mut Context<MouseModelView>| {
+                                    AppState::apply(cx, |state| state.commit_trigger_binding(button, TriggerSlot::Hold, None));
+                                })),
+                            ))
+                            .children(action_ring_setup_selector(
+                                "inspector-hold-setup",
+                                act,
+                                data.action_ring_setups,
+                                pal,
+                                {
+                                    let observer = picker.view.clone();
+                                    move |setup, _window, cx| {
+                                        AppState::apply(cx, |state| {
+                                            state.commit_trigger_binding(
+                                                button,
+                                                TriggerSlot::Hold,
+                                                Some(Action::ShowActionsRing(setup)),
+                                            )
+                                        });
+                                        observer.update(cx, |_, cx| cx.notify());
+                                    }
+                                },
+                            ))
                     } else {
-                        trigger_action_card(
+                        v_flex().child(trigger_action_card(
                             "inspector-hold-action",
                             tr!("actions.add_click_and_hold"),
                             TriggerSlot::Hold,
@@ -267,7 +348,7 @@ fn button_inspector(
                             picker,
                             pal,
                             None,
-                        )
+                        ))
                     })
                 })
         })
@@ -552,6 +633,25 @@ fn gesture_inspector(
             pal,
         ))
         .child(current_action_card(&current, picker, pal))
+        .children(action_ring_setup_selector(
+            "inspector-setup",
+            &current,
+            data.action_ring_setups,
+            pal,
+            {
+                let observer = picker.view.clone();
+                move |setup, _window, cx| {
+                    AppState::apply(cx, |state| {
+                        state.commit_gesture_binding(
+                            button,
+                            direction,
+                            Action::ShowActionsRing(setup),
+                        )
+                    });
+                    observer.update(cx, |_, cx| cx.notify());
+                }
+            },
+        ))
         .child(debounce_control(button, data.debounce_ms, pal))
         .when(offer_wheel_hold, |panel| {
             panel.child(wheel_hold_row(button, false, None, picker.view, pal))
@@ -1367,6 +1467,119 @@ fn gesture_action(
     })
 }
 
+type SetupSelectFn = Rc<dyn Fn(Option<String>, &mut Window, &mut App)>;
+
+fn action_ring_setup_selector(
+    id: &'static str,
+    action: &Action,
+    setups: &[String],
+    pal: Palette,
+    on_select: impl Fn(Option<String>, &mut Window, &mut App) + 'static,
+) -> Option<impl IntoElement> {
+    if let Action::ShowActionsRing(current_setup) = action {
+        Some(setup_selector_row(
+            id,
+            current_setup.as_deref(),
+            setups,
+            pal,
+            Rc::new(on_select),
+        ))
+    } else {
+        None
+    }
+}
+
+fn setup_selector_row(
+    id: &'static str,
+    current_setup: Option<&str>,
+    setups: &[String],
+    pal: Palette,
+    on_select: SetupSelectFn,
+) -> impl IntoElement {
+    let active_name = current_setup.unwrap_or(DEFAULT_SETUP_NAME);
+    let trigger_id = format!("{id}-dropdown");
+    let row_id = format!("{id}-row");
+    let setups = setups.to_vec();
+    let current_setup = current_setup.map(str::to_string);
+
+    h_flex()
+        .debug_selector(move || row_id.clone())
+        .w_full()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .px_3()
+        .py_1p5()
+        .rounded(pal.control_radius)
+        .border_1()
+        .border_color(pal.border)
+        .bg(pal.control)
+        .child(
+            h_flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    svg()
+                        .path("action-icons/layout-grid.svg")
+                        .size_3p5()
+                        .flex_none()
+                        .text_color(pal.text_muted),
+                )
+                .child(
+                    div()
+                        .text_caption()
+                        .text_color(pal.text_muted)
+                        .child(tr!("action_ring.setups")),
+                ),
+        )
+        .child(
+            control_button(trigger_id.clone())
+                .debug_selector(move || trigger_id.clone())
+                .small()
+                .label(active_name.to_string())
+                .icon(IconName::ChevronDown)
+                .dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |mut menu, _window, _cx| {
+                        for setup_name in &setups {
+                            let is_default = setup_name == DEFAULT_SETUP_NAME;
+                            let is_selected = if is_default {
+                                current_setup.is_none()
+                                    || current_setup.as_deref() == Some(DEFAULT_SETUP_NAME)
+                            } else {
+                                current_setup.as_deref() == Some(setup_name.as_str())
+                            };
+                            let name_for_commit = if is_default {
+                                None
+                            } else {
+                                Some(setup_name.clone())
+                            };
+                            let on_select = on_select.clone();
+                            let item_selector = format!("{id}-item-{setup_name}");
+                            let name_display = setup_name.clone();
+                            menu = menu.item(
+                                PopupMenuItem::element({
+                                    let name_display = name_display.clone();
+                                    let item_selector = item_selector.clone();
+                                    move |_, _| {
+                                        div()
+                                            .debug_selector({
+                                                let item_selector = item_selector.clone();
+                                                move || item_selector.clone()
+                                            })
+                                            .w_full()
+                                            .child(name_display.clone())
+                                    }
+                                })
+                                .checked(is_selected)
+                                .on_click(move |_, window, cx| {
+                                    (on_select)(name_for_commit.clone(), window, cx);
+                                }),
+                        );
+                    }
+                    menu
+                }),
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1422,6 +1635,7 @@ mod tests {
             hold_action: None,
             wheel_hold_mode: None,
             debounce_ms: 400,
+            action_ring_setups: &[],
         }
     }
 
@@ -1444,3 +1658,4 @@ mod tests {
         );
     }
 }
+

@@ -233,6 +233,7 @@ fn a_selected_gesture_can_render_in_the_binding_inspector(cx: &mut TestAppContex
                 hold_action: None,
                 wheel_hold_mode: None,
                 debounce_ms: 400,
+                action_ring_setups: &[],
             },
             ActionPickerContext {
                 open: true,
@@ -643,3 +644,119 @@ fn action_picker_browse_application_or_folder(cx: &mut TestAppContext) {
     cx.update(|window, _| window.remove_window());
     cx.run_until_parked();
 }
+
+fn action_wheel_setup_view(
+    cx: &mut TestAppContext,
+) -> (Entity<MouseModelView>, &mut VisualTestContext) {
+    cx.update(gpui_component::init);
+    cx.update(|cx| {
+        let resolver = AssetResolver::new();
+        let (commands, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let inventory = crate::state::tests::direct_inventory([0xa3, 0x93, 0xca, 0xe0]);
+        let state = cx.new(|_| {
+            let mut state = AppState::new(Sources {
+                inventories: &[inventory],
+                persistence: crate::state::ConfigPersistence::MemoryOnly,
+                ..Sources::in_memory(Config::ephemeral(), &resolver, commands)
+            });
+            let _ = state.create_action_ring_setup("Gaming");
+            state
+        });
+        AppState::set_global(state, cx);
+    });
+    let (view, cx) = cx.add_window_view(MouseModelView::new);
+    cx.simulate_resize(size(px(1200.), px(1000.)));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    (view, cx)
+}
+
+#[gpui::test]
+fn action_wheel_setup_selector_persists_and_configures_multiple_buttons(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    let (view, cx) = action_wheel_setup_view(cx);
+
+    // 1. Select Button(Forward), initially bound to default Forward
+    click_picker_control(cx, "label-card-Button(Forward)");
+    assert!(
+        cx.debug_bounds("inspector-setup-dropdown").is_none(),
+        "Setup dropdown is not shown when button is not bound to Actions Ring"
+    );
+
+    // 2. Open action picker and assign Button(Forward) to Action Wheel
+    click_picker_control(cx, "inspector-current-action");
+    view.read_with(cx, |view, _| assert!(view.action_picker_open));
+    cx.update(|window, cx| {
+        view.read(cx)
+            .action_search
+            .focus_handle(cx)
+            .focus(window, cx);
+    });
+    cx.simulate_input("Actions Ring");
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    click_picker_control(cx, "inspector-action-ShowActionsRing(None)");
+    view.read_with(cx, |view, _| assert!(!view.action_picker_open));
+
+    // Button(Forward) is now bound to Action::ShowActionsRing(None)
+    assert_forward_binding(cx, &Action::ShowActionsRing(None));
+
+    // 3. Setup dropdown is now exposed and initially shows "Default"
+    assert!(
+        cx.debug_bounds("inspector-setup-dropdown").is_some(),
+        "Assigning button to Action Wheel exposes the setup dropdown"
+    );
+
+    // 4. Click the setup dropdown to open it, then select "Gaming" setup
+    click_picker_control(cx, "inspector-setup-dropdown");
+    assert!(cx.debug_bounds("inspector-setup-item-Default").is_some());
+    assert!(cx.debug_bounds("inspector-setup-item-Gaming").is_some());
+    click_picker_control(cx, "inspector-setup-item-Gaming");
+
+    // Forward binding is now ShowActionsRing(Some("Gaming"))
+    assert_forward_binding(cx, &Action::ShowActionsRing(Some("Gaming".to_string())));
+
+    // 5. Select Button(Back), and assign it to Action Wheel (Default setup)
+    click_picker_control(cx, "label-card-Button(Back)");
+    assert!(cx.debug_bounds("inspector-setup-dropdown").is_none());
+
+    click_picker_control(cx, "inspector-current-action");
+    cx.update(|window, cx| {
+        view.read(cx)
+            .action_search
+            .focus_handle(cx)
+            .focus(window, cx);
+    });
+    cx.simulate_input("Actions Ring");
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    click_picker_control(cx, "inspector-action-ShowActionsRing(None)");
+
+    // Back is now ShowActionsRing(None), while Forward is still ShowActionsRing(Some("Gaming"))
+    cx.update(|_, cx| {
+        let bindings = AppState::try_read(cx).unwrap().button_bindings();
+        assert_eq!(
+            bindings.get(&ButtonId::Forward),
+            Some(&Action::ShowActionsRing(Some("Gaming".to_string())))
+        );
+        assert_eq!(
+            bindings.get(&ButtonId::Back),
+            Some(&Action::ShowActionsRing(None))
+        );
+    });
+
+    // Back inspector shows setup dropdown with "Default"
+    assert!(cx.debug_bounds("inspector-setup-dropdown").is_some());
+
+    // 6. Switch back to Button(Forward): verify inspector displays "Gaming" setup
+    click_picker_control(cx, "label-card-Button(Forward)");
+    assert!(cx.debug_bounds("inspector-setup-dropdown").is_some());
+
+    // 7. Selecting "Default" on Button(Forward) reverts binding to ShowActionsRing(None)
+    click_picker_control(cx, "inspector-setup-dropdown");
+    click_picker_control(cx, "inspector-setup-item-Default");
+    assert_forward_binding(cx, &Action::ShowActionsRing(None));
+
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
