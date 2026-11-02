@@ -52,6 +52,7 @@ preset = "Προεπιλογή"
 remove_named_item = "Κατάργηση %{name}"
 enable = "Ενεργοποίηση"
 not_now = "Όχι τώρα"
+browse = "Browse…"
 
 [app]
 open_openlogi = "Άνοιγμα του OpenLogi"

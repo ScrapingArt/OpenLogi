@@ -52,6 +52,7 @@ preset = "Пресет"
 remove_named_item = "Видалити %{name}"
 enable = "Увімкнути"
 not_now = "Не зараз"
+browse = "Browse…"
 
 [app]
 open_openlogi = "Відкрити OpenLogi"

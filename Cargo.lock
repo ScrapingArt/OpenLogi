@@ -5711,6 +5711,7 @@ dependencies = [
  "anyhow",
  "appcatalog",
  "appicon",
+ "block2 0.6.2",
  "derive_more",
  "disclaim",
  "embed-resource",

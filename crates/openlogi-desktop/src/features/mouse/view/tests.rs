@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, size};
 use openlogi_core::binding::default_binding;
 use openlogi_core::config::Config;
@@ -562,6 +564,81 @@ fn a_gesture_button_without_raw_wheel_offers_no_wheel_hold(cx: &mut TestAppConte
         cx.debug_bounds("inspector-wheel-hold-row").is_none(),
         "no switch where holding cannot scroll"
     );
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn action_picker_browse_application_or_folder(cx: &mut TestAppContext) {
+    let _locale = LOCALE_LOCK.lock().unwrap();
+    rust_i18n::set_locale("en");
+    cx.update(gpui_component::init);
+    install_app_state(cx);
+    let (view, cx) = cx.add_window_view(MouseModelView::new);
+    cx.simulate_resize(size(px(1200.), px(1000.)));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    click_picker_control(cx, "label-card-Button(Forward)");
+    click_picker_control(cx, "inspector-current-action");
+    view.read_with(cx, |view, _| assert!(view.action_picker_open));
+
+    // Verify Browse button presence via debug selector
+    assert!(
+        cx.debug_bounds("inspector-action-custom-application-browse")
+            .is_some()
+    );
+
+    // 1. Cancelling the prompt retains current input text and does not flag invalid state
+    click_picker_control(cx, "inspector-action-custom-application-input");
+    cx.simulate_input("/Applications/Notes.app");
+    click_picker_control(cx, "inspector-action-custom-application-browse");
+    assert!(cx.did_prompt_for_paths());
+    cx.simulate_path_prompt_response(|options| {
+        assert!(options.files);
+        assert!(options.directories);
+        assert!(!options.multiple);
+        None
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    view.read_with(cx, |view, cx| {
+        assert!(view.action_picker_open);
+        assert_eq!(
+            view.custom_application_input.read(cx).value(),
+            "/Applications/Notes.app"
+        );
+        assert!(!view.custom_application_invalid);
+    });
+    assert!(
+        cx.debug_bounds("inspector-action-custom-application-error")
+            .is_none()
+    );
+
+    // 2. Selecting a path updates input text and commits Action::OpenApplication(target)
+    click_picker_control(cx, "inspector-action-custom-application-browse");
+    assert!(cx.did_prompt_for_paths());
+    cx.simulate_path_prompt_response(|options| {
+        assert!(options.files);
+        assert!(options.directories);
+        assert!(!options.multiple);
+        Some(vec![PathBuf::from("/Applications/Safari.app")])
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    // Once committed, action picker closes
+    view.read_with(cx, |view, _| assert!(!view.action_picker_open));
+    cx.update(|_, cx| {
+        let Action::OpenApplication(target) =
+            &AppState::try_read(cx).unwrap().button_bindings()[&ButtonId::Forward]
+        else {
+            panic!("the application editor must commit an application action");
+        };
+        assert_eq!(target.path(), "/Applications/Safari.app");
+    });
+
     drop(view);
     cx.update(|window, _| window.remove_window());
     cx.run_until_parked();

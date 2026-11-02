@@ -52,6 +52,7 @@ preset = "Preajuste"
 remove_named_item = "Eliminar %{name}"
 enable = "Activar"
 not_now = "Ahora no"
+browse = "Browse…"
 
 [app]
 open_openlogi = "Abrir OpenLogi"

@@ -52,6 +52,7 @@ preset = "프리셋"
 remove_named_item = "%{name} 제거"
 enable = "활성화"
 not_now = "나중에"
+browse = "Browse…"
 
 [app]
 open_openlogi = "OpenLogi 열기"

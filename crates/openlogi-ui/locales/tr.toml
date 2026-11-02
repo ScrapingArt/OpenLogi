@@ -52,6 +52,7 @@ preset = "Ön ayar"
 remove_named_item = "%{name} öğesini kaldır"
 enable = "Etkinleştir"
 not_now = "Şimdi değil"
+browse = "Browse…"
 
 [app]
 open_openlogi = "OpenLogi'yi aç"

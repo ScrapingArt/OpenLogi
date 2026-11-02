@@ -52,6 +52,7 @@ preset = "Předvolba"
 remove_named_item = "Odstranit %{name}"
 enable = "Povolit"
 not_now = "Teď ne"
+browse = "Browse…"
 
 [app]
 open_openlogi = "Otevřít OpenLogi"

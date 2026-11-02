@@ -52,6 +52,7 @@ preset = "Voorinstelling"
 remove_named_item = "%{name} verwijderen"
 enable = "Inschakelen"
 not_now = "Niet nu"
+browse = "Browse…"
 
 [app]
 open_openlogi = "OpenLogi openen"
