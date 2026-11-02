@@ -279,11 +279,11 @@ impl SwipeAccumulator {
             self.last_click_at = None;
             return Some(GestureDirection::Hold);
         }
-        if let Some(prev) = self.last_click_at {
-            if now.saturating_duration_since(prev) <= timeout {
-                self.last_click_at = None;
-                return Some(GestureDirection::DoubleClick);
-            }
+        if let Some(prev) = self.last_click_at
+            && now.saturating_duration_since(prev) <= timeout
+        {
+            self.last_click_at = None;
+            return Some(GestureDirection::DoubleClick);
         }
         self.last_click_at = Some(now);
         Some(GestureDirection::Click)

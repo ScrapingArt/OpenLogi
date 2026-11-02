@@ -45,6 +45,7 @@ use super::{
     Load, Sources, StateEvent,
 };
 
+mod action_ring_setups;
 mod asset_targets;
 mod backlight;
 mod bindings;

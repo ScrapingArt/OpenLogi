@@ -89,8 +89,7 @@ pub fn default_gesture_binding(direction: GestureDirection) -> Action {
         GestureDirection::Left => Action::PrevTab,
         GestureDirection::Right => Action::NextTab,
         GestureDirection::Click => Action::AppExpose,
-        GestureDirection::DoubleClick => Action::None,
-        GestureDirection::Hold => Action::None,
+        GestureDirection::DoubleClick | GestureDirection::Hold => Action::None,
     }
 }
 
