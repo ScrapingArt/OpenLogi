@@ -337,8 +337,13 @@ impl Armed {
                 Some(event) = watchers.next() => {
                     running.apply_watcher(event, &inventory_refresh).await;
                 }
-                Some(device_key) = running.inputs.triggers.recv() => {
-                    running.begin_action_ring(device_key.as_deref()).await;
+                Some(trigger) = running.inputs.triggers.recv() => {
+                    running
+                        .begin_action_ring(
+                            trigger.device_key.as_deref(),
+                            trigger.setup.as_deref(),
+                        )
+                        .await;
                 }
                 Ok(()) = ring.changed() => {
                     running.apply_held_pointer().await;
@@ -574,7 +579,7 @@ impl Running {
         }
     }
 
-    async fn begin_action_ring(&self, device_key: Option<&str>) {
+    async fn begin_action_ring(&self, device_key: Option<&str>, setup: Option<&str>) {
         // A second trigger press while the ring is showing closes it.
         if let Some(dismissed) = self.inputs.ring.dismiss_active() {
             self.ring_haptics.end_session(dismissed);
@@ -584,7 +589,7 @@ impl Running {
             .orchestrator
             .lock()
             .await
-            .action_ring_session(device_key)
+            .action_ring_session(device_key, setup)
         {
             let haptic_route = session.haptic_route.clone();
             let invocation = self.inputs.ring.begin(session);

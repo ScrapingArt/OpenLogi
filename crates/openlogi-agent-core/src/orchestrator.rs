@@ -1586,6 +1586,7 @@ impl Orchestrator {
     pub fn action_ring_session(
         &self,
         triggering_device: Option<&str>,
+        setup: Option<&str>,
     ) -> Option<ActionRingSessionSpec> {
         let key = triggering_device.or_else(|| self.current_key())?;
         let device = self
@@ -1596,7 +1597,8 @@ impl Orchestrator {
         if !ring.enabled {
             return None;
         }
-        let layout = ring.effective_layout(&self.config.apps, self.current_app.as_deref());
+        let layout =
+            ring.effective_layout_for(setup, &self.config.apps, self.current_app.as_deref());
         if layout.slots.is_empty() {
             return None;
         }
