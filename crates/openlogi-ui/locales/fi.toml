@@ -52,6 +52,7 @@ preset = "Esiasetus"
 remove_named_item = "Poista %{name}"
 enable = "Ota käyttöön"
 not_now = "Ei nyt"
+browse = "Browse…"
 
 [app]
 open_openlogi = "Avaa OpenLogi"

@@ -52,6 +52,7 @@ preset = "Набор налад"
 remove_named_item = "Выдаліць %{name}"
 enable = "Уключыць"
 not_now = "Не зараз"
+browse = "Browse…"
 
 [app]
 open_openlogi = "Адкрыць OpenLogi"

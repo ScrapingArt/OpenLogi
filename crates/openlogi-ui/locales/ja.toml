@@ -52,6 +52,7 @@ preset = "プリセット"
 remove_named_item = "%{name} を削除"
 enable = "有効にする"
 not_now = "今はしない"
+browse = "Browse…"
 
 [app]
 open_openlogi = "OpenLogi を開く"

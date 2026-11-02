@@ -52,6 +52,7 @@ preset = "預設"
 remove_named_item = "移除 %{name}"
 enable = "啟用"
 not_now = "暫不"
+browse = "Browse…"
 
 [app]
 open_openlogi = "開啟 OpenLogi"
