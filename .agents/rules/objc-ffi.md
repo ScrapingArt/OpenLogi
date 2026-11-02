@@ -33,6 +33,7 @@ files; **keep this table in sync when you add or move one**:
 | `openlogi-camera/src/capture_macos.rs` | `AVCaptureSession` capture + the `define_class!` frame delegate, and the Camera TCC prompt |
 | `openlogi-camera/src/macos.rs` | `AVCaptureDevice` enumeration (`class!` + `msg_send!`) |
 | `openlogi-camera/src/uvc_macos.rs`, `.../uvc_macos/iokit.rs` | IOKit USB / UVC control transfers; every `unsafe` in the macOS UVC backend lives in `iokit.rs` |
+| `openlogi-desktop/src/platform/file_picker.rs` | `NSOpenPanel` modal/async open-file/folder dialog initialized to `/Applications` |
 | `openlogi-desktop/src/platform/registration/macos.rs` | `SMAppService` registration of the agent's launchd service (the login-item side of the agent lifecycle; the GUI must own it — the API resolves the plist against the calling app's bundle) |
 | `openlogi-desktop/src/platform/os.rs` | `NSProcessInfo` OS version + the `NSAppearance` titlebar sync |
 | `openlogi-hid/src/permissions.rs` | `IOHIDCheckAccess` / `IOHIDRequestAccess` (the prompting half of Input Monitoring) |
@@ -70,8 +71,8 @@ external [`axwatch`](https://crates.io/crates/axwatch) crate
 (`CFNotificationCenter` there, not here); `openlogi-hook`'s `grant::ProbeCue`
 and `openlogi-agent-core`'s grant watchers only consume its wakes.
 
-The rest of `openlogi-desktop/src/platform/` (`updater.rs`, on `gpui_updater`)
-carries **no** ObjC FFI — don't add any. Neither do `openlogi-core`'s
+The rest of `openlogi-desktop/src/platform/` (`updater.rs`, on `gpui_updater`,
+and `app_icon.rs`) carries **no** ObjC FFI — don't add any. Neither do `openlogi-core`'s
 `single_instance.rs` (fs4 lock) or `openlogi-agent`'s `autostart/macos.rs`
 (legacy-plist cleanup via `std::fs`).
 
@@ -302,7 +303,7 @@ under a `SAFETY` comment. Where it currently lives on macOS:
   `NSApp.appearance`.
 - `desktop/platform/registration/macos.rs` — the `SMAppService` calls (all generated
   bindings are `unsafe fn`s). Together with `os.rs`, the GUI's entire `unsafe`
-  surface.
+  surface (`file_picker.rs` is safe `objc2-app-kit` FFI).
 - `camera/{capture_macos,uvc_macos/iokit}.rs` — the AVFoundation capture FFI and the IOKit
   USB plug-in; `uvc_macos/iokit.rs` deliberately concentrates every `unsafe` of the
   macOS UVC backend so the descriptor parser above it is ordinary safe code.

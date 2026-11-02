@@ -66,9 +66,19 @@ serde_json.workspace = true
 # menu-bar status item lives in the agent, not here.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { workspace = true }
-objc2-app-kit = { workspace = true, features = ["NSApplication", "NSAppearance"] }
-objc2-foundation = { workspace = true, features = ["NSProcessInfo", "NSString", "NSError"] }
+objc2-app-kit = { workspace = true, features = [
+    "NSApplication",
+    "NSAppearance",
+    "NSOpenPanel",
+    "NSSavePanel",
+    "NSPanel",
+    "NSWindow",
+    "NSResponder",
+    "block2",
+] }
+objc2-foundation = { workspace = true, features = ["NSProcessInfo", "NSString", "NSError", "NSURL", "NSArray"] }
 objc2-service-management = { workspace = true, features = ["std", "SMAppService", "SMErrors", "objc2", "objc2-foundation"] }
+block2 = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg = "0.55"
