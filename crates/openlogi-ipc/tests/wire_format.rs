@@ -1149,6 +1149,11 @@ fn pointer_speed_and_precision_mode() {
         "00fb0001",
     );
     // Appended at the end of `Action`, so every earlier index is unchanged.
+    assert_wire(&Action::ShowActionsRing(None), "3200");
+    assert_wire(
+        &Action::ShowActionsRing(Some("Gaming".into())),
+        "32010647616d696e67",
+    );
     assert_wire(&Action::TogglePrecisionMode, "36");
     assert_wire(&Action::SmartZoom, "37");
 }

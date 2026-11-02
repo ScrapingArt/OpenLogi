@@ -19,7 +19,7 @@ use super::key_combo::KeyCombo;
 /// This type is pure config data: OS-level event synthesis for each variant
 /// lives in the `openlogi-inject` crate (`openlogi_inject::execute`), keeping
 /// this crate platform- and IO-free.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Action {
     // ── System ───────────────────────────────────────────────────────────────
     /// Suppress the input entirely — the button or wheel direction is captured
@@ -175,7 +175,8 @@ pub enum Action {
     Workflow(Vec<WorkflowStep>),
     /// Open the configured Actions Ring at the current pointer position.
     /// The agent handles the ring session rather than the OS injector.
-    ShowActionsRing,
+    /// An optional setup name specifies which setup layout to open (`None` for Default).
+    ShowActionsRing(Option<String>),
     /// Open an application, folder, filesystem path, or platform URL.
     OpenApplication(ApplicationTarget),
     /// Hold an arbitrary recorded key chord for the lifetime of its physical
@@ -319,7 +320,6 @@ macro_rules! for_each_unit_action {
             Screenshot "Screenshot" "actions.screenshot" System Camera,
             CaptureRegion "Capture Region" "actions.capture_region" System Camera,
             Sleep "Sleep" "actions.sleep" System Monitor,
-            ShowActionsRing "Actions Ring" "action_ring.actions_ring" System Grid,
             // Media
             PlayPause "Play / Pause" "actions.play_pause" Media Play,
             NextTrack "Next Track" "actions.next_track" Media NextTrack,
@@ -357,6 +357,8 @@ macro_rules! derive_action_core {
             pub fn label(&self) -> String {
                 match self {
                     $( Action::$variant => $label.into(), )*
+                    Action::ShowActionsRing(Some(setup)) => format!("Actions Ring ({setup})"),
+                    Action::ShowActionsRing(None) => "Actions Ring".into(),
                     Action::SetDpiPreset(i) => format!("DPI Preset {}", i + 1),
                     Action::CustomShortcut(combo) => combo.rendered_label(),
                     Action::TypeText(s) => format!("Type \"{s}\""),
@@ -383,7 +385,9 @@ macro_rules! derive_action_core {
             pub fn translation_key(&self) -> Option<&'static str> {
                 match self {
                     $( Action::$variant => Some($translation_key), )*
-                    Action::SetDpiPreset(_)
+                    Action::ShowActionsRing(None) => Some("action_ring.actions_ring"),
+                    Action::ShowActionsRing(Some(_))
+                    | Action::SetDpiPreset(_)
                     | Action::CustomShortcut(_)
                     | Action::TypeText(_)
                     | Action::RunAppleScript(_)
@@ -404,6 +408,7 @@ macro_rules! derive_action_core {
             pub fn translation_key_for_label(label: &str) -> Option<&'static str> {
                 match label {
                     $( $label => Some($translation_key), )*
+                    "Actions Ring" => Some("action_ring.actions_ring"),
                     _ => None,
                 }
             }
@@ -423,7 +428,7 @@ macro_rules! derive_action_core {
                     | Action::HoldShortcut(_)
                     | Action::TapKeyHoldingModifiers(_) => Category::Editing,
                     Action::SetDpiPreset(_) => Category::Dpi,
-                    Action::OpenApplication(_) => Category::System,
+                    Action::OpenApplication(_) | Action::ShowActionsRing(_) => Category::System,
                 }
             }
 
@@ -437,19 +442,274 @@ macro_rules! derive_action_core {
                 [ $( derive_action_core!(@item $variant $( $tag )?) ),* ]
                     .into_iter()
                     .flatten()
+                    .flatten()
                     .collect()
             }
         }
     };
+    (@item Sleep) => {
+        [Some(Action::Sleep), Some(Action::ShowActionsRing(None))]
+    };
     (@item $variant:ident) => {
-        Some(Action::$variant)
+        [Some(Action::$variant), None]
     };
     (@item $variant:ident not_pickable) => {
-        None
+        [None, None]
     };
 }
 
 for_each_unit_action!(derive_action_core);
+
+#[derive(Clone, Serialize, Deserialize)]
+enum ActionWire {
+    None,
+    LeftClick,
+    RightClick,
+    MiddleClick,
+    MouseBack,
+    MouseForward,
+    Copy,
+    Paste,
+    Cut,
+    Undo,
+    Redo,
+    SelectAll,
+    Find,
+    Save,
+    BrowserBack,
+    BrowserForward,
+    NewTab,
+    CloseTab,
+    ReopenTab,
+    NextTab,
+    PrevTab,
+    ReloadPage,
+    MissionControl,
+    AppExpose,
+    PreviousDesktop,
+    NextDesktop,
+    ShowDesktop,
+    LaunchpadShow,
+    LockScreen,
+    Screenshot,
+    CaptureRegion,
+    PlayPause,
+    NextTrack,
+    PrevTrack,
+    VolumeUp,
+    VolumeDown,
+    MuteVolume,
+    CycleDpiPresets,
+    SetDpiPreset(u8),
+    ToggleSmartShift,
+    ScrollUp,
+    ScrollDown,
+    HorizontalScrollLeft,
+    HorizontalScrollRight,
+    CustomShortcut(KeyCombo),
+    Sleep,
+    TypeText(String),
+    RunAppleScript(String),
+    RunShellCommand(String),
+    Workflow(Vec<WorkflowStep>),
+    ShowActionsRing(Option<String>),
+    OpenApplication(ApplicationTarget),
+    HoldShortcut(KeyCombo),
+    TapKeyHoldingModifiers(KeyCombo),
+    TogglePrecisionMode,
+    SmartZoom,
+}
+
+impl From<Action> for ActionWire {
+    fn from(action: Action) -> Self {
+        match action {
+            Action::None => Self::None,
+            Action::LeftClick => Self::LeftClick,
+            Action::RightClick => Self::RightClick,
+            Action::MiddleClick => Self::MiddleClick,
+            Action::MouseBack => Self::MouseBack,
+            Action::MouseForward => Self::MouseForward,
+            Action::Copy => Self::Copy,
+            Action::Paste => Self::Paste,
+            Action::Cut => Self::Cut,
+            Action::Undo => Self::Undo,
+            Action::Redo => Self::Redo,
+            Action::SelectAll => Self::SelectAll,
+            Action::Find => Self::Find,
+            Action::Save => Self::Save,
+            Action::BrowserBack => Self::BrowserBack,
+            Action::BrowserForward => Self::BrowserForward,
+            Action::NewTab => Self::NewTab,
+            Action::CloseTab => Self::CloseTab,
+            Action::ReopenTab => Self::ReopenTab,
+            Action::NextTab => Self::NextTab,
+            Action::PrevTab => Self::PrevTab,
+            Action::ReloadPage => Self::ReloadPage,
+            Action::MissionControl => Self::MissionControl,
+            Action::AppExpose => Self::AppExpose,
+            Action::PreviousDesktop => Self::PreviousDesktop,
+            Action::NextDesktop => Self::NextDesktop,
+            Action::ShowDesktop => Self::ShowDesktop,
+            Action::LaunchpadShow => Self::LaunchpadShow,
+            Action::LockScreen => Self::LockScreen,
+            Action::Screenshot => Self::Screenshot,
+            Action::CaptureRegion => Self::CaptureRegion,
+            Action::PlayPause => Self::PlayPause,
+            Action::NextTrack => Self::NextTrack,
+            Action::PrevTrack => Self::PrevTrack,
+            Action::VolumeUp => Self::VolumeUp,
+            Action::VolumeDown => Self::VolumeDown,
+            Action::MuteVolume => Self::MuteVolume,
+            Action::CycleDpiPresets => Self::CycleDpiPresets,
+            Action::SetDpiPreset(v) => Self::SetDpiPreset(v),
+            Action::ToggleSmartShift => Self::ToggleSmartShift,
+            Action::ScrollUp => Self::ScrollUp,
+            Action::ScrollDown => Self::ScrollDown,
+            Action::HorizontalScrollLeft => Self::HorizontalScrollLeft,
+            Action::HorizontalScrollRight => Self::HorizontalScrollRight,
+            Action::CustomShortcut(v) => Self::CustomShortcut(v),
+            Action::Sleep => Self::Sleep,
+            Action::TypeText(v) => Self::TypeText(v),
+            Action::RunAppleScript(v) => Self::RunAppleScript(v),
+            Action::RunShellCommand(v) => Self::RunShellCommand(v),
+            Action::Workflow(v) => Self::Workflow(v),
+            Action::ShowActionsRing(v) => Self::ShowActionsRing(v),
+            Action::OpenApplication(v) => Self::OpenApplication(v),
+            Action::HoldShortcut(v) => Self::HoldShortcut(v),
+            Action::TapKeyHoldingModifiers(v) => Self::TapKeyHoldingModifiers(v),
+            Action::TogglePrecisionMode => Self::TogglePrecisionMode,
+            Action::SmartZoom => Self::SmartZoom,
+        }
+    }
+}
+
+impl From<ActionWire> for Action {
+    fn from(wire: ActionWire) -> Self {
+        match wire {
+            ActionWire::None => Self::None,
+            ActionWire::LeftClick => Self::LeftClick,
+            ActionWire::RightClick => Self::RightClick,
+            ActionWire::MiddleClick => Self::MiddleClick,
+            ActionWire::MouseBack => Self::MouseBack,
+            ActionWire::MouseForward => Self::MouseForward,
+            ActionWire::Copy => Self::Copy,
+            ActionWire::Paste => Self::Paste,
+            ActionWire::Cut => Self::Cut,
+            ActionWire::Undo => Self::Undo,
+            ActionWire::Redo => Self::Redo,
+            ActionWire::SelectAll => Self::SelectAll,
+            ActionWire::Find => Self::Find,
+            ActionWire::Save => Self::Save,
+            ActionWire::BrowserBack => Self::BrowserBack,
+            ActionWire::BrowserForward => Self::BrowserForward,
+            ActionWire::NewTab => Self::NewTab,
+            ActionWire::CloseTab => Self::CloseTab,
+            ActionWire::ReopenTab => Self::ReopenTab,
+            ActionWire::NextTab => Self::NextTab,
+            ActionWire::PrevTab => Self::PrevTab,
+            ActionWire::ReloadPage => Self::ReloadPage,
+            ActionWire::MissionControl => Self::MissionControl,
+            ActionWire::AppExpose => Self::AppExpose,
+            ActionWire::PreviousDesktop => Self::PreviousDesktop,
+            ActionWire::NextDesktop => Self::NextDesktop,
+            ActionWire::ShowDesktop => Self::ShowDesktop,
+            ActionWire::LaunchpadShow => Self::LaunchpadShow,
+            ActionWire::LockScreen => Self::LockScreen,
+            ActionWire::Screenshot => Self::Screenshot,
+            ActionWire::CaptureRegion => Self::CaptureRegion,
+            ActionWire::PlayPause => Self::PlayPause,
+            ActionWire::NextTrack => Self::NextTrack,
+            ActionWire::PrevTrack => Self::PrevTrack,
+            ActionWire::VolumeUp => Self::VolumeUp,
+            ActionWire::VolumeDown => Self::VolumeDown,
+            ActionWire::MuteVolume => Self::MuteVolume,
+            ActionWire::CycleDpiPresets => Self::CycleDpiPresets,
+            ActionWire::SetDpiPreset(v) => Self::SetDpiPreset(v),
+            ActionWire::ToggleSmartShift => Self::ToggleSmartShift,
+            ActionWire::ScrollUp => Self::ScrollUp,
+            ActionWire::ScrollDown => Self::ScrollDown,
+            ActionWire::HorizontalScrollLeft => Self::HorizontalScrollLeft,
+            ActionWire::HorizontalScrollRight => Self::HorizontalScrollRight,
+            ActionWire::CustomShortcut(v) => Self::CustomShortcut(v),
+            ActionWire::Sleep => Self::Sleep,
+            ActionWire::TypeText(v) => Self::TypeText(v),
+            ActionWire::RunAppleScript(v) => Self::RunAppleScript(v),
+            ActionWire::RunShellCommand(v) => Self::RunShellCommand(v),
+            ActionWire::Workflow(v) => Self::Workflow(v),
+            ActionWire::ShowActionsRing(v) => Self::ShowActionsRing(v),
+            ActionWire::OpenApplication(v) => Self::OpenApplication(v),
+            ActionWire::HoldShortcut(v) => Self::HoldShortcut(v),
+            ActionWire::TapKeyHoldingModifiers(v) => Self::TapKeyHoldingModifiers(v),
+            ActionWire::TogglePrecisionMode => Self::TogglePrecisionMode,
+            ActionWire::SmartZoom => Self::SmartZoom,
+        }
+    }
+}
+
+impl Serialize for Action {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if serializer.is_human_readable() {
+            match self {
+                Action::ShowActionsRing(None) => serializer.serialize_str("ShowActionsRing"),
+                Action::ShowActionsRing(Some(setup)) => {
+                    use serde::ser::SerializeMap;
+                    let mut map = serializer.serialize_map(Some(1))?;
+                    map.serialize_entry("ShowActionsRing", setup)?;
+                    map.end()
+                }
+                other => ActionWire::from(other.clone()).serialize(serializer),
+            }
+        } else {
+            ActionWire::from(self.clone()).serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Action {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            struct ActionVisitor;
+
+            impl<'de> serde::de::Visitor<'de> for ActionVisitor {
+                type Value = Action;
+
+                fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    formatter.write_str("an action identifier or table")
+                }
+
+                fn visit_str<E>(self, value: &str) -> Result<Action, E>
+                where
+                    E: serde::de::Error,
+                {
+                    if value == "ShowActionsRing" {
+                        Ok(Action::ShowActionsRing(None))
+                    } else {
+                        ActionWire::deserialize(serde::de::IntoDeserializer::into_deserializer(value))
+                            .map(Action::from)
+                    }
+                }
+
+                fn visit_map<M>(self, map: M) -> Result<Action, M::Error>
+                where
+                    M: serde::de::MapAccess<'de>,
+                {
+                    ActionWire::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                        .map(Action::from)
+                }
+            }
+
+            deserializer.deserialize_any(ActionVisitor)
+        } else {
+            ActionWire::deserialize(deserializer).map(Action::from)
+        }
+    }
+}
 
 impl Action {
     /// The chord whose output must remain down until the originating press
@@ -461,6 +721,24 @@ impl Action {
             Self::HoldShortcut(combo) => Some((combo, HeldKeys::WholeChord)),
             Self::TapKeyHoldingModifiers(combo) => Some((combo, HeldKeys::ModifiersOnly)),
             _ => None,
+        }
+    }
+
+    /// Update any reference to a setup named `old` to `new`.
+    pub fn rename_setup(&mut self, old: &str, new: &str) {
+        if let Action::ShowActionsRing(Some(name)) = self {
+            if name == old {
+                *name = new.to_string();
+            }
+        }
+    }
+
+    /// Reset any reference to a setup named `setup` back to the default setup (`None`).
+    pub fn delete_setup(&mut self, setup: &str) {
+        if let Action::ShowActionsRing(Some(name)) = self {
+            if name == setup {
+                *self = Action::ShowActionsRing(None);
+            }
         }
     }
 }

@@ -70,7 +70,7 @@ pub fn default_binding(button: ButtonId) -> Action {
         ButtonId::ThumbwheelScrollUp => Action::HorizontalScrollLeft,
         ButtonId::ThumbwheelScrollDown => Action::HorizontalScrollRight,
         ButtonId::GestureButton => Action::MissionControl,
-        ButtonId::HapticPanel => Action::ShowActionsRing,
+        ButtonId::HapticPanel => Action::ShowActionsRing(None),
         // Keyboard keys stay on their native firmware function until the user
         // explicitly binds them; an unbound key is never diverted, so a
         // `None` default keeps the projection total without capturing anything.

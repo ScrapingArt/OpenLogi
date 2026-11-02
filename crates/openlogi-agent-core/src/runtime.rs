@@ -147,7 +147,7 @@ impl ActionExecutor {
         // the pointer is over the ring's own floating window, which classifies
         // as `PointerTarget::Unavailable`, and a gated second trigger press
         // could never close the ring.
-        if matches!(action, Action::ShowActionsRing) {
+        if matches!(action, Action::ShowActionsRing(_)) {
             if self
                 .action_ring
                 .send(device_key.map(str::to_owned))
@@ -776,7 +776,7 @@ mod tests {
         };
 
         executor.dispatch_to(
-            &Action::ShowActionsRing,
+            &Action::ShowActionsRing(None),
             Some("mouse"),
             ActionDispatchTarget::for_pointer(
                 Some(openlogi_hook::PointerTarget::Unavailable),

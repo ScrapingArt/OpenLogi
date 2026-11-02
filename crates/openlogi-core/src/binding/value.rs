@@ -124,6 +124,30 @@ impl MultiClickBinding {
         self.debounce_ms = debounce_ms;
         self
     }
+
+    /// Reconcile setup references when a setup is renamed.
+    pub fn rename_setup_references(&mut self, old: &str, new: &str) {
+        self.click.rename_setup(old, new);
+        self.double.rename_setup(old, new);
+        if let Some(triple) = &mut self.triple {
+            triple.rename_setup(old, new);
+        }
+        if let Some(hold) = &mut self.hold {
+            hold.rename_setup(old, new);
+        }
+    }
+
+    /// Reconcile setup references when a setup is deleted.
+    pub fn delete_setup_references(&mut self, setup: &str) {
+        self.click.delete_setup(setup);
+        self.double.delete_setup(setup);
+        if let Some(triple) = &mut self.triple {
+            triple.delete_setup(setup);
+        }
+        if let Some(hold) = &mut self.hold {
+            hold.delete_setup(setup);
+        }
+    }
 }
 
 /// The mutually exclusive actions of a threshold-based button binding.
@@ -154,6 +178,18 @@ impl LongPressBinding {
     #[must_use]
     pub const fn long(&self) -> &Action {
         &self.long
+    }
+
+    /// Reconcile setup references when a setup is renamed.
+    pub fn rename_setup_references(&mut self, old: &str, new: &str) {
+        self.short.rename_setup(old, new);
+        self.long.rename_setup(old, new);
+    }
+
+    /// Reconcile setup references when a setup is deleted.
+    pub fn delete_setup_references(&mut self, setup: &str) {
+        self.short.delete_setup(setup);
+        self.long.delete_setup(setup);
     }
 }
 
@@ -214,6 +250,16 @@ impl WheelHoldBinding {
     #[must_use]
     pub const fn wheel(&self) -> HeldWheel {
         self.wheel
+    }
+
+    /// Reconcile setup references when a setup is renamed.
+    pub fn rename_setup_references(&mut self, old: &str, new: &str) {
+        self.click.rename_setup(old, new);
+    }
+
+    /// Reconcile setup references when a setup is deleted.
+    pub fn delete_setup_references(&mut self, setup: &str) {
+        self.click.delete_setup(setup);
     }
 }
 
@@ -370,6 +416,36 @@ impl Binding {
                 map.entry(dir)
                     .or_insert_with(|| default_gesture_binding(dir));
             }
+        }
+    }
+
+    /// Reconcile setup references across this binding when a setup is renamed.
+    pub fn rename_setup_references(&mut self, old: &str, new: &str) {
+        match self {
+            Binding::Single(action) => action.rename_setup(old, new),
+            Binding::Gesture(map) => {
+                for action in map.values_mut() {
+                    action.rename_setup(old, new);
+                }
+            }
+            Binding::LongPress(binding) => binding.rename_setup_references(old, new),
+            Binding::WheelHold(binding) => binding.rename_setup_references(old, new),
+            Binding::MultiClick(binding) => binding.rename_setup_references(old, new),
+        }
+    }
+
+    /// Reconcile setup references across this binding when a setup is deleted.
+    pub fn delete_setup_references(&mut self, setup: &str) {
+        match self {
+            Binding::Single(action) => action.delete_setup(setup),
+            Binding::Gesture(map) => {
+                for action in map.values_mut() {
+                    action.delete_setup(setup);
+                }
+            }
+            Binding::LongPress(binding) => binding.delete_setup_references(setup),
+            Binding::WheelHold(binding) => binding.delete_setup_references(setup),
+            Binding::MultiClick(binding) => binding.delete_setup_references(setup),
         }
     }
 }
