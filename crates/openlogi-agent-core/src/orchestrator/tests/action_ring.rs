@@ -1,7 +1,7 @@
 //! Action Ring session resolution tests across multiple setups and button bindings.
 
 use super::*;
-use openlogi_core::binding::{ActionRingSlot, RingAction};
+use openlogi_core::binding::{ActionRingEntry, ActionRingSlot, RingAction};
 
 #[test]
 fn action_ring_session_resolves_default_setup_when_unspecified() {
@@ -26,7 +26,7 @@ fn action_ring_session_resolves_default_setup_when_unspecified() {
             .layout
             .slots
             .get(&ActionRingSlot::Top)
-            .map(|s| s.action()),
+            .map(ActionRingEntry::action),
         Some(&Action::Cut)
     );
 }
@@ -54,7 +54,7 @@ fn action_ring_session_resolves_named_setup() {
             .layout
             .slots
             .get(&ActionRingSlot::Top)
-            .map(|s| s.action()),
+            .map(ActionRingEntry::action),
         Some(&Action::Copy)
     );
 }
@@ -82,7 +82,7 @@ fn action_ring_session_falls_back_to_default_for_nonexistent_setup() {
             .layout
             .slots
             .get(&ActionRingSlot::Top)
-            .map(|s| s.action()),
+            .map(ActionRingEntry::action),
         Some(&Action::Cut)
     );
 }
@@ -130,7 +130,7 @@ fn two_distinct_buttons_with_different_setups_trigger_corresponding_layouts() {
             .layout
             .slots
             .get(&ActionRingSlot::Top)
-            .map(|s| s.action()),
+            .map(ActionRingEntry::action),
         Some(&Action::Cut)
     );
 
@@ -142,7 +142,7 @@ fn two_distinct_buttons_with_different_setups_trigger_corresponding_layouts() {
             .layout
             .slots
             .get(&ActionRingSlot::Top)
-            .map(|s| s.action()),
+            .map(ActionRingEntry::action),
         Some(&Action::Copy)
     );
 }

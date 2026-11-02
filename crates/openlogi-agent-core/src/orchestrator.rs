@@ -1579,7 +1579,13 @@ impl Orchestrator {
     }
 
     /// Snapshot the active device and effective ring layout for a new
-    /// invocation. `None` means the ring is disabled, empty, or has no active
+    /// invocation.
+    ///
+    /// `setup` selects which named Actions Ring setup to display; passing
+    /// `None` or an unregistered setup name safely resolves to the default
+    /// setup layout.
+    ///
+    /// Returns `None` if the ring is disabled, empty, or has no active
     /// persistent device. The returned layout is owned so later config and
     /// foreground-app changes cannot alter an already-open ring session.
     #[must_use]
