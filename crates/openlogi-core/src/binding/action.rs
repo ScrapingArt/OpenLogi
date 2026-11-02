@@ -726,19 +726,19 @@ impl Action {
 
     /// Update any reference to a setup named `old` to `new`.
     pub fn rename_setup(&mut self, old: &str, new: &str) {
-        if let Action::ShowActionsRing(Some(name)) = self {
-            if name == old {
-                *name = new.to_string();
-            }
+        if let Action::ShowActionsRing(Some(name)) = self
+            && name == old
+        {
+            *name = new.to_string();
         }
     }
 
     /// Reset any reference to a setup named `setup` back to the default setup (`None`).
     pub fn delete_setup(&mut self, setup: &str) {
-        if let Action::ShowActionsRing(Some(name)) = self {
-            if name == setup {
-                *self = Action::ShowActionsRing(None);
-            }
+        if let Action::ShowActionsRing(Some(name)) = self
+            && name == setup
+        {
+            *self = Action::ShowActionsRing(None);
         }
     }
 }

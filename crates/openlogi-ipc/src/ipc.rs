@@ -153,7 +153,8 @@ pub use succession::Identity;
 ///      `BacklightChange::Duration` appended — the `0x1982` backlight
 ///      timer, five-second steps up to two hours.
 /// v42: `Action::SmartZoom` appended — native Apple Trackpad Smart Zoom
-///      (two-finger double tap simulation).
+///      (two-finger double tap simulation); `Action::ShowActionsRing` gained
+///      an optional named setup payload (`Option<String>`).
 pub const PROTOCOL_VERSION: u32 = 42;
 
 /// Environment variable through which the agent hands a supervised helper the

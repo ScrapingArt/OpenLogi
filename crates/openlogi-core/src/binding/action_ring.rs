@@ -291,7 +291,7 @@ impl Default for ActionRingLayout {
 pub const DEFAULT_SETUP_NAME: &str = "Default";
 
 /// A named Actions Ring setup, containing a default layout and optional per-application layout overrides.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActionRingSetup {
     /// Default layout used when the foreground application has no override.
@@ -300,15 +300,6 @@ pub struct ActionRingSetup {
     /// Complete layout overrides keyed by foreground application identifier.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub per_app: BTreeMap<String, ActionRingLayout>,
-}
-
-impl Default for ActionRingSetup {
-    fn default() -> Self {
-        Self {
-            default: ActionRingLayout::default(),
-            per_app: BTreeMap::new(),
-        }
-    }
 }
 
 impl ActionRingSetup {
@@ -983,5 +974,12 @@ Bottom = { action = { CustomShortcut = "Cmd+Shift+P" } }
             toml::from_str(&multi_serialized).expect("deserialize multi-setup config");
         assert_eq!(deserialized_multi, multi);
         assert!(deserialized_multi.setups.contains_key("Work"));
+    }
+
+    #[test]
+    fn action_ring_setup_default() {
+        let setup = ActionRingSetup::default();
+        assert_eq!(setup.default, ActionRingLayout::default());
+        assert!(setup.per_app.is_empty());
     }
 }

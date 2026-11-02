@@ -300,6 +300,7 @@ fn a_profile_for_an_undefined_alias_fails_to_load() {
     for profile in [
         "[devices.mouse.per_app_bindings.\"app:editr\"]\nBack = \"Undo\"\n",
         "[devices.mouse.action_ring.per_app.\"app:editr\".slots]\nTop = { action = \"Copy\" }\n",
+        "[devices.mouse.action_ring.setups.CAD.per_app.\"app:editr\".slots]\nTop = { action = \"Copy\" }\n",
     ] {
         let source = format!("schema_version = 9\n{profile}[apps.editor]\nlinux = \"editor\"\n");
         assert_matches!(

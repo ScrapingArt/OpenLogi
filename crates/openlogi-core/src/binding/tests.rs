@@ -225,6 +225,26 @@ fn show_actions_ring_serde_compatibility() {
     assert_eq!(deserialized_inline, named_action);
 }
 
+#[test]
+fn action_rename_and_delete_setup() {
+    let mut action = Action::ShowActionsRing(Some("Gaming".into()));
+    action.rename_setup("Work", "Office");
+    assert_eq!(action, Action::ShowActionsRing(Some("Gaming".into())));
+    action.rename_setup("Gaming", "Competitive");
+    assert_eq!(action, Action::ShowActionsRing(Some("Competitive".into())));
+
+    action.delete_setup("Work");
+    assert_eq!(action, Action::ShowActionsRing(Some("Competitive".into())));
+    action.delete_setup("Competitive");
+    assert_eq!(action, Action::ShowActionsRing(None));
+
+    let mut unconfigured = Action::ShowActionsRing(None);
+    unconfigured.rename_setup("Default", "Primary");
+    assert_eq!(unconfigured, Action::ShowActionsRing(None));
+    unconfigured.delete_setup("Default");
+    assert_eq!(unconfigured, Action::ShowActionsRing(None));
+}
+
 // ── Binding (merged model) serde routing ──────────────────────────────────
 
 /// On-disk shape: a `ButtonId` → [`Binding`] map, as `DeviceConfig.bindings`
